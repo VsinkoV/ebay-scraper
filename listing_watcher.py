@@ -1020,6 +1020,15 @@ class DepopScraper:
         "window.chrome={runtime:{}};"
         "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
     )
+    _NEXT_JS = r"""() => {
+        try {
+            const nd = window.__NEXT_DATA__;
+            if (!nd) return [];
+            const pp = nd.props?.pageProps || {};
+            return (pp.products || pp.searchResults?.products ||
+                    pp.initialData?.products || pp.data?.products || []);
+        } catch(e) { return []; }
+    }"""
 
     def __init__(self):
         self._browser = _get_pw().chromium.launch(
@@ -1035,30 +1044,38 @@ class DepopScraper:
         api_items: list[dict] = []
 
         def _on_response(resp):
-            if "webapi.depop.com" in resp.url and resp.status == 200:
-                try:
+            try:
+                ct = resp.headers.get("content-type", "")
+                if "depop.com" in resp.url and "json" in ct and resp.status == 200:
                     data = resp.json()
-                    products = data.get("products") or data.get("items") or []
-                    if isinstance(products, list):
+                    products = (data.get("products") or data.get("items") or
+                                (data.get("data") or {}).get("products") or [])
+                    if isinstance(products, list) and products:
                         api_items.extend(products)
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
         self._page.on("response", _on_response)
         url = f"{self.WEB_BASE}/search/?q={requests.utils.quote(query)}&sort=NewestFirst"
         try:
             self._page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            self._page.wait_for_timeout(4000)
+            self._page.wait_for_timeout(5000)
         except Exception as e:
-            print(f"  \u274c Depop fetch error: {e}")
+            print(f"  ❌ Depop fetch error: {e}")
         finally:
             self._page.remove_listener("response", _on_response)
 
         if not api_items:
-            print(f"  \u274c Depop — no API response intercepted")
+            try:
+                api_items = self._page.evaluate(self._NEXT_JS) or []
+            except Exception:
+                pass
+
+        if not api_items:
+            print(f"  ❌ Depop — no data found (Cloudflare may be blocking)")
             return []
 
-        print(f"  {ICONS['depop']} Depop — {len(api_items)} items via API")
+        print(f"  {ICONS['depop']} Depop — {len(api_items)} items")
         results = []
         for item in api_items:
             try:
