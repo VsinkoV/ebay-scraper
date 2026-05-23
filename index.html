@@ -567,8 +567,14 @@
     <button class="sort-btn active" data-sort="newest" onclick="setSortBargains('newest',this)">Newest</button>
     <button class="sort-btn" data-sort="price_asc" onclick="setSortBargains('price_asc',this)">Price ↑</button>
     <button class="sort-btn" data-sort="price_desc" onclick="setSortBargains('price_desc',this)">Price ↓</button>
-    <div style="margin-left:auto;display:flex;gap:8px">
+    <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
       <button class="sort-btn" id="btn-sold-filter" onclick="toggleSoldFilter()">Filter: OFF</button>
+      <span id="filter-pct-wrap" style="display:none;align-items:center;gap:3px">
+        <input type="number" id="filter-pct" value="100" min="1" max="200" step="5"
+          style="width:52px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:3px 6px;font-size:12px"
+          oninput="renderBargains()">
+        <span style="color:var(--muted);font-size:12px">%</span>
+      </span>
       <button class="btn btn-ghost" onclick="clearBargains()">Clear</button>
     </div>
   </div>
@@ -1129,7 +1135,9 @@ function _soldThreshold(b) {
     return s?.sold_median ? { median: s.sold_median, mean: s.sold_mean } : null;
   })();
   if (!st) return null;
-  return soldFilter === 'median' ? parseFloat(st.median) : parseFloat(st.mean);
+  const base = soldFilter === 'median' ? parseFloat(st.median) : parseFloat(st.mean);
+  const pct  = parseFloat(document.getElementById('filter-pct')?.value || 100) / 100;
+  return base * pct;
 }
 
 function renderBargains() {
@@ -1158,18 +1166,17 @@ function renderBargains() {
 function toggleSoldFilter() {
   const cycle = { off: 'median', median: 'mean', mean: 'off' };
   soldFilter = cycle[soldFilter];
-  const btn = document.getElementById('btn-sold-filter');
+  const btn  = document.getElementById('btn-sold-filter');
+  const wrap = document.getElementById('filter-pct-wrap');
   if (soldFilter === 'off') {
     btn.textContent = 'Filter: OFF';
     btn.classList.remove('active');
+    wrap.style.display = 'none';
   } else {
-    // Show the actual threshold £ values across all queries that have data
-    const vals = searches
-      .filter(s => soldStats[s.query]?.[soldFilter] || s[`sold_${soldFilter}`])
-      .map(s => `£${parseFloat(soldStats[s.query]?.[soldFilter] || s[`sold_${soldFilter}`]).toFixed(0)}`);
     const label = soldFilter === 'median' ? 'Median' : 'Mean';
-    btn.textContent = `≤ ${label}${vals.length ? ': '+vals.join(' / ') : ''}`;
+    btn.textContent = `≤ % of ${label}`;
     btn.classList.add('active');
+    wrap.style.display = 'flex';
   }
   renderBargains();
 }
