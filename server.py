@@ -24,10 +24,34 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
+
+# ── Beta code auth ────────────────────────────────────────────────────────────
+# Set BETA_CODES env var as comma-separated codes e.g. "ALPHA01,FRIEND02,VIP03"
+# If not set, auth is disabled (useful for local dev)
+_RAW_CODES = os.environ.get("BETA_CODES", "")
+BETA_CODES: set = {c.strip().upper() for c in _RAW_CODES.split(",") if c.strip()}
+
+OPEN_PATHS = {"/", "/api/auth/verify"}   # always accessible without a code
+
+class BetaAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if not BETA_CODES:                          # auth disabled locally
+            return await call_next(request)
+        path = request.url.path
+        if path in OPEN_PATHS or path.startswith("/ws"):
+            return await call_next(request)
+        code = (
+            request.cookies.get("beta_code") or
+            request.headers.get("X-Beta-Code", "")
+        ).upper()
+        if code not in BETA_CODES:
+            return JSONResponse({"detail": "Invalid beta code"}, status_code=401)
+        return await call_next(request)
 
 # ── Paths (same as gui.py) ────────────────────────────────────────────────────
 DATASETS_DIR        = Path("datasets")
@@ -339,6 +363,7 @@ def _ts() -> str:
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = FastAPI(title="Unifi")
+app.add_middleware(BetaAuthMiddleware)
 pm  = ProcessManager()
 
 
@@ -376,6 +401,21 @@ class SettingsIn(BaseModel):
     ebay_app_id:     str = ""
     ebay_cert_id:    str = ""
     discord_webhook: str = ""
+
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+class CodeIn(BaseModel):
+    code: str
+
+@app.post("/api/auth/verify")
+def api_verify(body: CodeIn, response: JSONResponse):
+    from fastapi.responses import JSONResponse as JR
+    code = body.code.strip().upper()
+    if BETA_CODES and code not in BETA_CODES:
+        raise HTTPException(401, "Invalid beta code")
+    r = JR({"ok": True})
+    r.set_cookie("beta_code", code, max_age=60*60*24*30, httponly=True, samesite="lax")
+    return r
 
 
 # ── REST: Searches ────────────────────────────────────────────────────────────

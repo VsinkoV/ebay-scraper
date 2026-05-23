@@ -453,6 +453,36 @@
 </head>
 <body>
 
+<!-- ── Beta gate ──────────────────────────────────────────────────────────── -->
+<div id="gate" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:999;
+     display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px">
+  <div style="display:flex;align-items:center;gap:12px">
+    <div class="logo-icon" style="width:48px;height:48px;border-radius:12px;font-size:22px">U</div>
+    <div>
+      <div style="font-size:22px;font-weight:700">Unifi</div>
+      <div style="color:var(--muted);font-size:13px">Marketplace Watcher · Beta</div>
+    </div>
+  </div>
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;
+              padding:32px;width:360px;display:flex;flex-direction:column;gap:16px">
+    <div>
+      <div style="font-weight:600;font-size:15px;margin-bottom:4px">Enter your beta code</div>
+      <div style="color:var(--muted);font-size:12px">You need an invite to access this app</div>
+    </div>
+    <input id="gate-input" placeholder="e.g. ALPHA01"
+      style="background:var(--bg3);border:1px solid var(--border2);border-radius:6px;
+             color:var(--text);font-size:15px;padding:12px;outline:none;
+             text-transform:uppercase;letter-spacing:0.1em;width:100%"
+      onkeydown="if(event.key==='Enter')submitCode()">
+    <div id="gate-error" style="color:var(--red);font-size:12px;display:none">
+      Invalid code — check your invite and try again
+    </div>
+    <button class="btn btn-primary" style="width:100%;padding:12px" onclick="submitCode()">
+      Access Beta →
+    </button>
+  </div>
+</div>
+
 <!-- ── Nav ─────────────────────────────────────────────────────────────── -->
 <nav>
   <div class="logo">
@@ -642,6 +672,35 @@
 </div>
 
 <script>
+// ── Beta gate ─────────────────────────────────────────────────────────────────
+async function checkAuth() {
+  const r = await fetch('/api/searches').catch(() => ({ status: 401 }));
+  if (r.status === 401) {
+    document.getElementById('gate').style.display = 'flex';
+    document.getElementById('gate-input').focus();
+  } else {
+    document.getElementById('gate').style.display = 'none';
+    init();
+  }
+}
+
+async function submitCode() {
+  const code = document.getElementById('gate-input').value.trim();
+  if (!code) return;
+  const r = await fetch('/api/auth/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code })
+  });
+  if (r.ok) {
+    document.getElementById('gate').style.display = 'none';
+    init();
+  } else {
+    document.getElementById('gate-error').style.display = 'block';
+    document.getElementById('gate-input').style.borderColor = 'var(--red)';
+  }
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 let searches   = [];
 let bargains   = [];
@@ -1022,10 +1081,14 @@ async function tickCountdowns() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-connectWS();
-loadSearches();
-loadSettings();
-setInterval(tickCountdowns, 1000);
+function init() {
+  connectWS();
+  loadSearches();
+  loadSettings();
+  setInterval(tickCountdowns, 1000);
+}
+
+checkAuth();
 </script>
 </body>
 </html>
