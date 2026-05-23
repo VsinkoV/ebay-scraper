@@ -490,44 +490,48 @@ def auth_login():
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request, code: str = "", state: str = ""):
-    saved_state = request.cookies.get("oauth_state", "")
-    if state != saved_state:
-        raise HTTPException(400, "Invalid state")
+    import traceback as _tb
+    try:
+        saved_state = request.cookies.get("oauth_state", "")
+        if state != saved_state:
+            return HTMLResponse(f"<pre>State mismatch\ngot: {state!r}\nexpected: {saved_state!r}</pre>", status_code=400)
 
-    async with httpx.AsyncClient() as client:
-        token_r = await client.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "code":          code,
-                "client_id":     GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri":  f"{APP_URL}/auth/callback",
-                "grant_type":    "authorization_code",
-            },
-        )
-        token_r.raise_for_status()
-        access_token = token_r.json()["access_token"]
+        async with httpx.AsyncClient() as client:
+            token_r = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code":          code,
+                    "client_id":     GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "redirect_uri":  f"{APP_URL}/auth/callback",
+                    "grant_type":    "authorization_code",
+                },
+            )
+            if not token_r.is_success:
+                return HTMLResponse(f"<pre>Token exchange failed {token_r.status_code}:\n{token_r.text}</pre>", status_code=500)
+            access_token = token_r.json()["access_token"]
 
-        info_r = await client.get(
-            "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        info_r.raise_for_status()
-        email = info_r.json().get("email", "unknown")
+            info_r = await client.get(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            info_r.raise_for_status()
+            email = info_r.json().get("email", "unknown")
 
-    if email in _load_approved_emails():
-        r = RedirectResponse("/")
-        r.set_cookie("session", _make_session(email),
-                     max_age=60*60*24*30, httponly=True, samesite="lax")
+        if email in _load_approved_emails():
+            r = RedirectResponse("/")
+            r.set_cookie("session", _make_session(email),
+                         max_age=60*60*24*30, httponly=True, samesite="lax")
+            r.delete_cookie("oauth_state")
+            return r
+
+        r = RedirectResponse("/auth/beta")
+        r.set_cookie("pending_email", _make_pending(email),
+                     max_age=600, httponly=True, samesite="lax")
         r.delete_cookie("oauth_state")
         return r
-
-    # Not yet approved — send to beta code page
-    r = RedirectResponse("/auth/beta")
-    r.set_cookie("pending_email", _make_pending(email),
-                 max_age=600, httponly=True, samesite="lax")
-    r.delete_cookie("oauth_state")
-    return r
+    except Exception as e:
+        return HTMLResponse(f"<pre>Callback error: {type(e).__name__}: {e}\n\n{_tb.format_exc()}</pre>", status_code=500)
 
 
 _BETA_PAGE = """<!DOCTYPE html>
