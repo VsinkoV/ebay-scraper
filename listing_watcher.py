@@ -1014,45 +1014,66 @@ class VintedScraper:
 
 # ── Depop (Playwright DOM scraping) ──────────────────────────────────────────
 class DepopScraper:
-    API = "https://webapi.depop.com/api/v2/search/products/"
-    _HEADERS = {
-        "Accept":          "application/json",
-        "Accept-Language": "en-GB,en;q=0.9",
-        "Referer":         "https://www.depop.com/",
-        "Origin":          "https://www.depop.com",
-        "User-Agent":      UA,
-    }
+    WEB_BASE = "https://www.depop.com"
+    _STEALTH = (
+        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+        "window.chrome={runtime:{}};"
+        "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
+    )
 
     def __init__(self):
-        self._session = requests.Session()
-        self._session.headers.update(self._HEADERS)
-        print(f"  {ICONS['depop']} Depop ready (direct API)")
+        self._browser = _get_pw().chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--lang=en-GB"],
+        )
+        self._ctx  = self._browser.new_context(locale="en-GB", user_agent=UA, viewport={"width": 1280, "height": 800})
+        self._ctx.add_init_script(self._STEALTH)
+        self._page = self._ctx.new_page()
+        # Seed Cloudflare cookies by visiting the homepage once
+        try:
+            self._page.goto(self.WEB_BASE, wait_until="domcontentloaded", timeout=20_000)
+            self._page.wait_for_timeout(2000)
+        except Exception:
+            pass
+        print(f"  {ICONS['depop']} Depop browser ready")
 
     def fetch(self, query: str) -> list[dict]:
-        params = {
-            "searchQuery": query,
-            "sort":        "NewestFirst",
-            "limit":       "50",
-            "offset":      "0",
-        }
+        import urllib.parse
+        encoded = urllib.parse.quote(query)
+        api_url = (
+            f"https://webapi.depop.com/api/v2/search/products/"
+            f"?searchQuery={encoded}&sort=NewestFirst&limit=50&offset=0"
+        )
+        # Execute the API fetch from inside the browser — auth cookies are included automatically
         try:
-            resp = self._session.get(self.API, params=params, timeout=15)
+            self._page.goto(
+                f"{self.WEB_BASE}/search/?q={encoded}&sort=NewestFirst",
+                wait_until="domcontentloaded", timeout=30_000,
+            )
+            self._page.wait_for_timeout(3000)
+            data = self._page.evaluate(f"""async () => {{
+                try {{
+                    const r = await fetch({repr(api_url)}, {{
+                        credentials: 'include',
+                        headers: {{
+                            'Accept': 'application/json',
+                            'Referer': 'https://www.depop.com/'
+                        }}
+                    }});
+                    if (!r.ok) return {{ error: r.status }};
+                    return await r.json();
+                }} catch(e) {{ return {{ error: e.toString() }}; }}
+            }}""")
         except Exception as e:
-            print(f"  ❌ Depop request error: {e}")
+            print(f"  ❌ Depop fetch error: {e}")
             return []
 
-        if resp.status_code != 200:
-            print(f"  ❌ Depop API returned {resp.status_code}")
-            return []
-
-        try:
-            data = resp.json()
-        except Exception:
-            print(f"  ❌ Depop — invalid JSON response")
+        if not data or data.get("error"):
+            print(f"  ❌ Depop — in-browser fetch failed: {data.get('error') if data else 'no response'}")
             return []
 
         products = data.get("products") or data.get("items") or []
-        print(f"  {ICONS['depop']} Depop — {len(products)} items via API")
+        print(f"  {ICONS['depop']} Depop — {len(products)} items via in-browser API")
 
         results = []
         for item in products:
@@ -1086,7 +1107,10 @@ class DepopScraper:
         return results
 
     def close(self):
-        self._session.close()
+        try:
+            self._browser.close()
+        except Exception:
+            pass
 
 # ── Mercari Japan (Playwright) ────────────────────────────────────────────────
 class MercariJPScraper:
