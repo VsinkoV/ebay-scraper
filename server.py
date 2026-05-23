@@ -39,7 +39,8 @@ GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 SECRET_KEY           = os.environ.get("SECRET_KEY", "dev-secret-please-change")
 APP_URL              = os.environ.get("APP_URL", "http://localhost:8000")
 
-_signer = TimestampSigner(SECRET_KEY)
+_signer         = TimestampSigner(SECRET_KEY)
+_pending_signer = TimestampSigner(SECRET_KEY + "-pending")
 
 def _make_session(email: str) -> str:
     return _signer.sign(email.encode()).decode()
@@ -50,7 +51,16 @@ def _verify_session(cookie: str) -> "str | None":
     except BadSignature:
         return None
 
-OPEN_PATHS = {"/", "/auth/login", "/auth/callback", "/api/auth/verify"}
+def _make_pending(email: str) -> str:
+    return _pending_signer.sign(email.encode()).decode()
+
+def _verify_pending(cookie: str) -> "str | None":
+    try:
+        return _pending_signer.unsign(cookie.encode(), max_age=600).decode()
+    except BadSignature:
+        return None
+
+OPEN_PATHS = {"/", "/auth/login", "/auth/callback", "/auth/beta", "/api/auth/verify"}
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -74,9 +84,48 @@ CONFIG_FILE         = DATASETS_DIR / "config.json"
 BARGAINS_FILE       = DATASETS_DIR / "bargains.json"
 MISSED_FILE         = DATASETS_DIR / "missed_deals.json"
 THRESHOLDS_FILE     = DATASETS_DIR / "thresholds.json"
+APPROVED_EMAILS_FILE = DATASETS_DIR / "approved_emails.json"
+USED_CODES_FILE      = DATASETS_DIR / "used_codes.json"
 PYTHON              = sys.executable
 
 DATASETS_DIR.mkdir(exist_ok=True)
+
+
+def _load_approved_emails() -> set:
+    if not APPROVED_EMAILS_FILE.exists():
+        return set()
+    try:
+        return set(json.loads(APPROVED_EMAILS_FILE.read_text()))
+    except Exception:
+        return set()
+
+
+def _approve_email(email: str) -> None:
+    emails = _load_approved_emails()
+    emails.add(email)
+    DATASETS_DIR.mkdir(exist_ok=True)
+    APPROVED_EMAILS_FILE.write_text(json.dumps(list(emails)))
+
+
+def _load_used_codes() -> set:
+    if not USED_CODES_FILE.exists():
+        return set()
+    try:
+        return set(json.loads(USED_CODES_FILE.read_text()))
+    except Exception:
+        return set()
+
+
+def _burn_code(code: str) -> None:
+    used = _load_used_codes()
+    used.add(code.upper())
+    DATASETS_DIR.mkdir(exist_ok=True)
+    USED_CODES_FILE.write_text(json.dumps(list(used)))
+
+
+def _valid_beta_code(code: str) -> bool:
+    codes = {c.strip().upper() for c in os.environ.get("BETA_CODES", "").split(",") if c.strip()}
+    return bool(code) and code.upper() in codes and code.upper() not in _load_used_codes()
 
 CONFIG_DEFAULTS = {
     "ebay_app_id":     "",
@@ -466,10 +515,91 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
         info_r.raise_for_status()
         email = info_r.json().get("email", "unknown")
 
-    r = RedirectResponse("/")
+    if email in _load_approved_emails():
+        r = RedirectResponse("/")
+        r.set_cookie("session", _make_session(email),
+                     max_age=60*60*24*30, httponly=True, samesite="lax")
+        r.delete_cookie("oauth_state")
+        return r
+
+    # Not yet approved — send to beta code page
+    r = RedirectResponse("/auth/beta")
+    r.set_cookie("pending_email", _make_pending(email),
+                 max_age=600, httponly=True, samesite="lax")
+    r.delete_cookie("oauth_state")
+    return r
+
+
+_BETA_PAGE = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Unifi — Beta Access</title>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{background:#0b0f18;color:#e2e8f0;font-family:system-ui,sans-serif;
+          display:flex;align-items:center;justify-content:center;height:100vh}}
+    .card{{background:#161c2d;border:1px solid #2d3748;border-radius:12px;
+           padding:40px;width:360px}}
+    h1{{font-size:1.4rem;margin-bottom:8px}}
+    p{{color:#94a3b8;font-size:.9rem;margin-bottom:24px}}
+    .email{{background:#0b0f18;border-radius:6px;padding:8px 12px;
+            color:#7dd3fc;font-size:.85rem;margin-bottom:20px}}
+    input{{width:100%;padding:10px 14px;background:#0b0f18;
+           border:1px solid #2d3748;border-radius:8px;color:#e2e8f0;
+           font-size:1rem;letter-spacing:.1em;margin-bottom:16px}}
+    input:focus{{outline:none;border-color:#3b82f6}}
+    button{{width:100%;padding:11px;background:#3b82f6;color:#fff;
+            border:none;border-radius:8px;font-size:1rem;cursor:pointer}}
+    button:hover{{background:#2563eb}}
+    .err{{color:#f87171;font-size:.85rem;margin-bottom:12px}}
+    a{{color:#94a3b8;font-size:.8rem;display:block;text-align:center;margin-top:16px}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Beta Access</h1>
+    <p>You're signed in but need a beta code to use Unifi.</p>
+    <div class="email">{email}</div>
+    {error}
+    <form method="post">
+      <input name="code" placeholder="Enter beta code" autocomplete="off" autofocus>
+      <button type="submit">Activate</button>
+    </form>
+    <a href="/auth/logout">Sign out</a>
+  </div>
+</body>
+</html>"""
+
+
+@app.get("/auth/beta")
+async def auth_beta_get(request: Request):
+    email = _verify_pending(request.cookies.get("pending_email", ""))
+    if not email:
+        return RedirectResponse("/auth/login")
+    return HTMLResponse(_BETA_PAGE.format(email=email, error=""))
+
+
+@app.post("/auth/beta")
+async def auth_beta_post(request: Request):
+    email = _verify_pending(request.cookies.get("pending_email", ""))
+    if not email:
+        return RedirectResponse("/auth/login")
+
+    form = await request.form()
+    code = (form.get("code") or "").strip()
+
+    if not _valid_beta_code(code):
+        err = '<p class="err">Invalid or already-used code — try again.</p>'
+        return HTMLResponse(_BETA_PAGE.format(email=email, error=err), status_code=400)
+
+    _burn_code(code)
+    _approve_email(email)
+
+    r = RedirectResponse("/", status_code=303)
     r.set_cookie("session", _make_session(email),
                  max_age=60*60*24*30, httponly=True, samesite="lax")
-    r.delete_cookie("oauth_state")
+    r.delete_cookie("pending_email")
     return r
 
 
