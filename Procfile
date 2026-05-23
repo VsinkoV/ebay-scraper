@@ -1,1 +1,1 @@
-web: uvicorn server:app --host 0.0.0.0 --port $PORT
+web: PLAYWRIGHT_BROWSERS_PATH=/app/pw-browsers playwright install chromium --with-deps && PLAYWRIGHT_BROWSERS_PATH=/app/pw-browsers uvicorn server:app --host 0.0.0.0 --port $PORT
