@@ -942,24 +942,58 @@ class MercariJPScraper:
     BASE = "https://jp.mercari.com"
 
     _JS = r"""() => {
-        let items = Array.from(document.querySelectorAll('[data-testid="item-cell"]'));
-        if (items.length < 3)
-            items = Array.from(document.querySelectorAll('li')).filter(
-                li => li.querySelector('a[href*="/item/m"]')
-            );
-        return items.map(el => {
-            const link    = el.querySelector('a[href*="/item/"]');
-            const img     = el.querySelector('img');
-            const spans   = Array.from(el.querySelectorAll('span'));
-            const priceEl = spans.find(s => s.innerText.includes('¥'));
-            const nameEl  = el.querySelector('[class*="name" i],[class*="title" i],[aria-label]');
-            return {
-                href:  link    ? link.href : null,
-                price: priceEl ? priceEl.innerText.trim() : null,
-                name:  nameEl  ? (nameEl.innerText || nameEl.getAttribute('aria-label') || '').trim() : null,
-                img:   img     ? img.src : null,
-            };
-        }).filter(i => i.href && i.href.includes('/item/'));
+        // Strategy 1: Next.js pre-rendered data (fastest, no DOM needed)
+        try {
+            const nd = window.__NEXT_DATA__;
+            if (nd) {
+                const pp = nd.props?.pageProps || {};
+                const raw = pp.items || pp.initialItems
+                         || pp.searchResult?.items
+                         || pp.data?.items || [];
+                if (raw.length > 0) {
+                    return raw.map(it => ({
+                        href:  'https://jp.mercari.com/item/' + it.id,
+                        price: String(it.price || ''),
+                        name:  it.name || '',
+                        img:   (it.thumbnails || [])[0] || it.thumbnail_url || '',
+                        _src:  'nextdata',
+                    }));
+                }
+            }
+        } catch(e) {}
+
+        // Strategy 2: mer-item-thumbnail web components
+        const wc = Array.from(document.querySelectorAll('mer-item-thumbnail'));
+        if (wc.length > 0) {
+            return wc.map(el => ({
+                href:  el.getAttribute('item-url') || ('https://jp.mercari.com/item/' + el.getAttribute('item-id')),
+                price: el.getAttribute('price') || '',
+                name:  el.getAttribute('name') || '',
+                img:   el.getAttribute('thumbnail-url') || '',
+                _src:  'webcomponent',
+            })).filter(i => i.href && i.href.includes('/item/'));
+        }
+
+        // Strategy 3: generic li with /item/ link
+        const lis = Array.from(document.querySelectorAll('li')).filter(
+            li => li.querySelector('a[href*="/item/"]')
+        );
+        if (lis.length > 0) {
+            return lis.map(el => {
+                const link = el.querySelector('a[href*="/item/"]');
+                const img  = el.querySelector('img');
+                const all  = Array.from(el.querySelectorAll('span, p'));
+                const prEl = all.find(s => /[¥￥]/.test(s.innerText));
+                return {
+                    href:  link ? link.href : null,
+                    price: prEl ? prEl.innerText.replace(/[¥￥,\s]/g, '') : null,
+                    name:  link ? (link.getAttribute('aria-label') || link.title || link.innerText.trim()) : null,
+                    img:   img  ? img.src : null,
+                    _src:  'dom',
+                };
+            }).filter(i => i.href && i.href.includes('/item/'));
+        }
+        return [];
     }"""
 
     def __init__(self):
@@ -980,6 +1014,9 @@ class MercariJPScraper:
         except Exception as e:
             print(f"  ❌ Mercari JP error: {e}")
             return []
+
+        if cards:
+            print(f"  {ICONS['mercari_jp']} Mercari JP — {len(cards)} items via {cards[0].get('_src','?')}")
 
         results = []
         for card in cards:
