@@ -568,6 +568,7 @@
     <button class="sort-btn" data-sort="price_asc" onclick="setSortBargains('price_asc',this)">Price ↑</button>
     <button class="sort-btn" data-sort="price_desc" onclick="setSortBargains('price_desc',this)">Price ↓</button>
     <div style="margin-left:auto;display:flex;gap:8px">
+      <button class="sort-btn" id="btn-sold-filter" onclick="toggleSoldFilter()">≤ Sold median: OFF</button>
       <button class="btn btn-ghost" onclick="clearBargains()">Clear</button>
     </div>
   </div>
@@ -768,6 +769,8 @@ let editingName = null;
 let intervalVal = 5;
 let ws = null;
 const priceRanges = {}; // { "query|platform": {min, max, count} }
+const soldStats   = {}; // { query: {median, mean, min, max, count} }
+let filterSoldRange = false;
 
 const PLAT_ICON  = { ebay: '🛒', vinted: '👗', depop: '📦', mercari_jp: '🇯🇵', rakuten_jp: '🎌' };
 const PLAT_COLOR = { ebay: 'var(--ebay)', vinted: 'var(--vinted)', depop: 'var(--depop)', mercari_jp: '#ff0211', rakuten_jp: '#bf0000' };
@@ -805,6 +808,19 @@ function connectWS() {
       const d = msg.data;
       priceRanges[d.query + '|' + d.platform] = d;
       updatePriceRangeRow(d);
+    }
+    if (msg.type === 'sold_update') {
+      const ebay = msg.stats?.ebay;
+      if (ebay) soldStats[msg.query] = ebay;
+      const s = searches.find(x => x.query === msg.query);
+      if (s) {
+        s.sold_median = ebay?.median;
+        s.sold_mean   = ebay?.mean;
+        s.sold_count  = ebay?.count;
+        updateSoldCells(s.name, ebay);
+      }
+      if (filterSoldRange) renderBargains();
+      if (document.querySelector('.tab-btn[data-tab="alerts"]')?.classList.contains('active')) loadAlerts();
     }
   };
 
@@ -937,12 +953,12 @@ function renderTasks() {
         ${s.interval_min}m
         ${s.running ? `<span class="countdown" id="cd-${s.name.replace(/\W/g,'_')}"></span>` : ''}
       </div>
-      <div class="row-sold">
+      <div class="row-sold" id="med-${s.name.replace(/\W/g,'_')}">
         ${s.sold_median
           ? `<div class="row-sold-val">£${parseFloat(s.sold_median).toFixed(2)}</div><div class="row-sold-lbl">median${s.sold_count ? ' ('+s.sold_count+')' : ''}</div>`
           : `<div class="row-sold-val" style="color:var(--faint)">—</div><div class="row-sold-lbl">median</div>`}
       </div>
-      <div class="row-sold">
+      <div class="row-sold" id="avg-${s.name.replace(/\W/g,'_')}">
         ${s.sold_mean
           ? `<div class="row-sold-val" style="color:var(--muted)">£${parseFloat(s.sold_mean).toFixed(2)}</div><div class="row-sold-lbl">average</div>`
           : `<div class="row-sold-val" style="color:var(--faint)">—</div><div class="row-sold-lbl">average</div>`}
@@ -966,12 +982,23 @@ function renderTasks() {
 }
 
 function updatePriceRangeRow(d) {
-  // Find the task row whose query matches and update its live range cell
   const s = searches.find(x => x.query === d.query);
   if (!s) return;
   const el = document.getElementById('range-' + s.name.replace(/\W/g,'_'));
   if (!el) return;
   el.innerHTML = `<div class="row-sold-val" style="color:var(--blue)">£${d.min.toFixed(0)}–£${d.max.toFixed(0)}</div><div class="row-sold-lbl">live (${d.count})</div>`;
+}
+
+function updateSoldCells(name, stats) {
+  const id = name.replace(/\W/g,'_');
+  const med = document.getElementById('med-' + id);
+  const avg = document.getElementById('avg-' + id);
+  if (med) med.innerHTML = stats?.median
+    ? `<div class="row-sold-val">£${parseFloat(stats.median).toFixed(2)}</div><div class="row-sold-lbl">median${stats.count ? ' ('+stats.count+')' : ''}</div>`
+    : `<div class="row-sold-val" style="color:var(--faint)">—</div><div class="row-sold-lbl">median</div>`;
+  if (avg) avg.innerHTML = stats?.mean
+    ? `<div class="row-sold-val" style="color:var(--muted)">£${parseFloat(stats.mean).toFixed(2)}</div><div class="row-sold-lbl">average</div>`
+    : `<div class="row-sold-val" style="color:var(--faint)">—</div><div class="row-sold-lbl">average</div>`;
 }
 
 async function startSearch(name) {
@@ -1098,17 +1125,32 @@ function sortedBargains() {
 
 function renderBargains() {
   const el = document.getElementById('bargains-list');
-  const items = sortedBargains();
+  let items = sortedBargains();
+  if (filterSoldRange) {
+    items = items.filter(b => {
+      const st = soldStats[b.query] || searches.find(s => s.query === b.query && s.sold_median) && { median: searches.find(s => s.query === b.query).sold_median };
+      if (!st?.median) return true;
+      return parsePrice(b.price) <= parseFloat(st.median);
+    });
+  }
   if (!items.length) {
     el.innerHTML = `<div class="empty">
-      <div class="empty-title">No new listings yet</div>
-      <div class="empty-sub">Start a watch in Tasks to begin finding listings</div>
+      <div class="empty-title">${filterSoldRange ? 'No listings at or below sold median' : 'No new listings yet'}</div>
+      <div class="empty-sub">${filterSoldRange ? 'Turn off the filter or scrape eBay sold data in Alerts' : 'Start a watch in Tasks to begin finding listings'}</div>
     </div>`;
     updateBadge('bargains', 0);
     return;
   }
   el.innerHTML = items.map(b => itemRow(b, b.is_bargain ? 'var(--yellow)' : 'var(--bg3)', false)).join('');
   updateBadge('bargains', items.length);
+}
+
+function toggleSoldFilter() {
+  filterSoldRange = !filterSoldRange;
+  const btn = document.getElementById('btn-sold-filter');
+  btn.textContent = `≤ Sold median: ${filterSoldRange ? 'ON' : 'OFF'}`;
+  btn.classList.toggle('active', filterSoldRange);
+  renderBargains();
 }
 
 async function clearBargains() {

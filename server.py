@@ -937,6 +937,8 @@ async def api_db_scrape(request: Request):
             lw.scrape_ebay_sold(query, max_pages=max_pages, min_records=min_records)
         elif platform == "mercari_jp":
             lw.scrape_mercari_jp_sold(query)
+        stats = _db_query_stats(query)
+        pm._enqueue({"type": "sold_update", "query": query, "stats": stats})
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "message": f"Scraping {platform} sold data for '{query}' in background"}
