@@ -77,14 +77,14 @@ COLOURS = {
     "vinted":     0x007782,
     "depop":      0xFF4040,
     "mercari_jp": 0xFF0211,   # Mercari red
-    "yahoo_jp":   0xFF0034,   # Yahoo Japan red
+    "rakuten_jp":  0xBF0000,   # Rakuten crimson
 }
 ICONS = {
     "ebay":       "🛒",
     "vinted":     "👗",
     "depop":      "📦",
     "mercari_jp": "🇯🇵",
-    "yahoo_jp":   "🏯",
+    "rakuten_jp": "🎌",
 }
 
 # ── JPY → GBP conversion (cached 1 hour) ─────────────────────────────────────
@@ -1055,60 +1055,50 @@ class MercariJPScraper:
 
 
 # ── Yahoo Auctions Japan (Playwright) ─────────────────────────────────────────
-class YahooAuctionsScraper:
-    BASE = "https://auctions.yahoo.co.jp"
+class RakutenJPScraper:
+    BASE = "https://search.rakuten.co.jp/search/mall"
 
     _JS = r"""() => {
-        let items = Array.from(document.querySelectorAll('.Product'));
-        if (items.length < 3)
-            items = Array.from(document.querySelectorAll('li')).filter(
-                li => li.querySelector('a[href*="auctions.yahoo.co.jp/item/"]')
-            );
-        return items.map(el => {
-            const link  = el.querySelector('a.Product__titleLink, a[href*="/item/"]');
-            const price = el.querySelector('.Product__price, .Product__bid');
-            const img   = el.querySelector('img');
+        const containers = Array.from(document.querySelectorAll('.searchresultitem'));
+        return containers.map(c => {
+            const link  = c.querySelector('a[href*="item.rakuten.co.jp"]');
+            const img   = c.querySelector('img');
             return {
-                href:  link  ? link.href            : null,
-                title: link  ? link.innerText.trim(): null,
-                price: price ? price.innerText.trim(): null,
-                img:   img   ? img.src              : null,
+                href:     link ? link.href : null,
+                title:    img  ? img.alt  : (link ? link.innerText.trim() : null),
+                price:    c.getAttribute('data-track-price'),
+                item_id:  c.getAttribute('data-track-itemid'),
+                img:      img  ? img.src  : null,
             };
-        }).filter(i => i.href);
+        }).filter(i => i.href && i.item_id);
     }"""
 
     def __init__(self):
         self._browser = _get_pw().chromium.launch(headless=True)
         self._ctx     = self._browser.new_context(user_agent=UA, locale="ja-JP")
         self._page    = self._ctx.new_page()
-        print(f"  {ICONS['yahoo_jp']} Yahoo Auctions JP browser ready")
+        print(f"  {ICONS['rakuten_jp']} Rakuten JP browser ready")
 
     def fetch(self, query: str) -> list[dict]:
-        url = (
-            f"{self.BASE}/search/search"
-            f"?p={requests.utils.quote(query)}&n=100&s1=new&o1=d"
-        )
+        url = f"{self.BASE}/{requests.utils.quote(query)}/?s=2"
         try:
             self._page.goto(url, wait_until="networkidle", timeout=30_000)
             self._page.wait_for_timeout(1500)
             cards = self._page.evaluate(self._JS)
         except Exception as e:
-            print(f"  ❌ Yahoo Auctions JP error: {e}")
+            print(f"  ❌ Rakuten JP error: {e}")
             return []
 
         results = []
         for card in cards:
             try:
-                href      = card.get("href") or ""
-                item_id   = href.rstrip("/").split("/")[-1]
-                raw       = (card.get("price") or "").replace("円", "").replace(",", "").strip()
-                price_jpy = int(raw) if raw.isdigit() else None
+                price_jpy = int(card["price"]) if card.get("price") and str(card["price"]).isdigit() else None
                 price_gbp = _jpy_to_gbp(price_jpy) if price_jpy else None
                 results.append({
-                    "platform":     "yahoo_jp",
-                    "item_id":      item_id,
+                    "platform":     "rakuten_jp",
+                    "item_id":      card["item_id"].replace("/", "_"),
                     "title":        card.get("title") or "",
-                    "price":        str(price_gbp) if price_gbp else raw,
+                    "price":        str(price_gbp) if price_gbp else (card.get("price") or ""),
                     "currency":     "GBP" if price_gbp else "JPY",
                     "condition":    "",
                     "brand":        "",
@@ -1116,7 +1106,7 @@ class YahooAuctionsScraper:
                     "seller":       "",
                     "location":     "Japan",
                     "image_url":    card.get("img") or "",
-                    "url":          href,
+                    "url":          card.get("href") or "",
                     "listed_at":    "",
                     "fetched_at":   datetime.now(timezone.utc).isoformat(),
                     "search_query": query,
@@ -1274,8 +1264,8 @@ def _ensure_scrapers(platforms: list[str], scrapers: dict) -> None:
         scrapers["depop"]      = DepopScraper()
     if "mercari_jp" in platforms and "mercari_jp" not in scrapers:
         scrapers["mercari_jp"] = MercariJPScraper()
-    if "yahoo_jp"   in platforms and "yahoo_jp"   not in scrapers:
-        scrapers["yahoo_jp"]   = YahooAuctionsScraper()
+    if "rakuten_jp"  in platforms and "rakuten_jp"  not in scrapers:
+        scrapers["rakuten_jp"] = RakutenJPScraper()
 
 
 def _ebay_sold_flow(query: str) -> None:
@@ -1331,7 +1321,7 @@ def _run_watch_cli() -> None:
     try:
         poll(query, platforms, scrapers, name=name, exclude_keywords=exclude_kws)
     finally:
-        for name in ("vinted", "depop", "mercari_jp", "yahoo_jp"):
+        for name in ("vinted", "depop", "mercari_jp", "rakuten_jp"):
             if name in scrapers:
                 scrapers[name].close()
         _stop_pw()
