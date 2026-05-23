@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# All dataset files — CSVs, PNGs, and sensitive JSON config
+datasets/
+
+# Debug artefacts
+debug_page.html
+debug_page1.png
+debug_timeout_p1.png
+form_debug.html
+form_debug2.html
+
+# Unrelated files
+analysis.pdf
+cold_war_crisis.py
+fluid_sim.py
+fluid_sim_3d.py
