@@ -387,6 +387,9 @@ class ProcessManager:
         cfg = load_config()
         env = {**os.environ}
         if cfg.get("discord_webhook"): env["UNIFI_DISCORD_WEBHOOK"] = cfg["discord_webhook"]
+        # Ensure Playwright finds its browsers in the same place as the server
+        if "PLAYWRIGHT_BROWSERS_PATH" not in env:
+            env["PLAYWRIGHT_BROWSERS_PATH"] = "/app/pw-browsers"
 
         cmd = [
             PYTHON, "listing_watcher.py", "--watch",
