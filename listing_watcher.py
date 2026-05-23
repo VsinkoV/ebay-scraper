@@ -1020,6 +1020,27 @@ class DepopScraper:
         "window.chrome={runtime:{}};"
         "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
     )
+    _JS = r"""() => {
+        const cards = Array.from(document.querySelectorAll('li')).filter(
+            li => li.querySelector("a[href*='/products/']")
+        );
+        return cards.map(li => {
+            const link   = li.querySelector("a[href*='/products/']");
+            const img    = li.querySelector('img');
+            const texts  = Array.from(li.querySelectorAll('p'))
+                .map(p => p.textContent.trim()).filter(t => t.length > 0);
+            const prices = texts.filter(t => t.includes('£'));
+            const sizes  = texts.filter(t => /^(UK|EU|US|One)/i.test(t));
+            const brand  = texts.find(t => !t.includes('£') && !/^(UK|EU|US|One)/i.test(t)) || '';
+            return {
+                href:  link ? link.href : null,
+                price: prices[0] || null,
+                size:  sizes[0]  || null,
+                brand: brand,
+                img:   img ? img.src : null,
+            };
+        }).filter(c => c.href);
+    }"""
 
     def __init__(self):
         self._browser = _get_pw().chromium.launch(
@@ -1029,75 +1050,46 @@ class DepopScraper:
         self._ctx  = self._browser.new_context(locale="en-GB", user_agent=UA, viewport={"width": 1280, "height": 800})
         self._ctx.add_init_script(self._STEALTH)
         self._page = self._ctx.new_page()
-        # Seed Cloudflare cookies by visiting the homepage once
-        try:
-            self._page.goto(self.WEB_BASE, wait_until="domcontentloaded", timeout=20_000)
-            self._page.wait_for_timeout(2000)
-        except Exception:
-            pass
         print(f"  {ICONS['depop']} Depop browser ready")
 
     def fetch(self, query: str) -> list[dict]:
-        import urllib.parse
-        encoded = urllib.parse.quote(query)
-        api_url = (
-            f"https://webapi.depop.com/api/v2/search/products/"
-            f"?searchQuery={encoded}&sort=NewestFirst&limit=50&offset=0"
-        )
-        # Execute the API fetch from inside the browser — auth cookies are included automatically
+        url = f"{self.WEB_BASE}/search/?q={requests.utils.quote(query)}&sort=NewestFirst"
         try:
-            self._page.goto(
-                f"{self.WEB_BASE}/search/?q={encoded}&sort=NewestFirst",
-                wait_until="domcontentloaded", timeout=30_000,
-            )
+            self._page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             self._page.wait_for_timeout(3000)
-            data = self._page.evaluate(f"""async () => {{
-                try {{
-                    const r = await fetch({repr(api_url)}, {{
-                        credentials: 'include',
-                        headers: {{
-                            'Accept': 'application/json',
-                            'Referer': 'https://www.depop.com/'
-                        }}
-                    }});
-                    if (!r.ok) return {{ error: r.status }};
-                    return await r.json();
-                }} catch(e) {{ return {{ error: e.toString() }}; }}
-            }}""")
+            cards = self._page.evaluate(self._JS)
         except Exception as e:
             print(f"  ❌ Depop fetch error: {e}")
             return []
 
-        if not data or data.get("error"):
-            print(f"  ❌ Depop — in-browser fetch failed: {data.get('error') if data else 'no response'}")
+        if not cards:
+            print(f"  ❌ Depop — 0 cards found in DOM")
             return []
 
-        products = data.get("products") or data.get("items") or []
-        print(f"  {ICONS['depop']} Depop — {len(products)} items via in-browser API")
-
+        print(f"  {ICONS['depop']} Depop — {len(cards)} items via DOM")
         results = []
-        for item in products:
+        for card in cards:
             try:
-                slug      = item.get("slug") or str(item.get("id", ""))
-                price_obj = item.get("price") or {}
-                price_raw = str(price_obj.get("priceAmount") or price_obj.get("amount") or "").strip()
-                seller    = (item.get("seller") or {}).get("username") or ""
-                previews  = item.get("preview") or item.get("pictures") or []
-                img_url   = previews[0].get("url", "") if previews else ""
-                title     = (item.get("description") or "").strip() or slug.replace("-", " ").title()
+                href  = card["href"] or ""
+                slug  = href.rstrip("/").split("/")[-1]
+                parts = slug.split("-")
+                seller = parts[0] if parts else ""
+                title_parts = parts[1:-1] if len(parts) > 2 else parts
+                title = " ".join(title_parts).title()
+                raw_price = (card.get("price") or "").replace("£", "").replace(",", "").strip()
                 results.append({
                     "platform":     "depop",
                     "item_id":      slug,
                     "title":        title[:120],
-                    "price":        price_raw,
+                    "price":        raw_price,
                     "currency":     "GBP",
                     "condition":    "",
-                    "brand":        "",
-                    "size":         "",
+                    "brand":        card.get("brand") or "",
+                    "size":         card.get("size") or "",
                     "seller":       seller,
                     "location":     "",
-                    "image_url":    img_url,
-                    "url":          f"https://www.depop.com/products/{slug}/",
+                    "image_url":    card.get("img") or "",
+                    "url":          href,
                     "listed_at":    "",
                     "fetched_at":   datetime.now(timezone.utc).isoformat(),
                     "search_query": query,
