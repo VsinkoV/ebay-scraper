@@ -17,6 +17,7 @@ import os
 import re
 import random
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -1471,12 +1472,32 @@ def _ebay_sold_flow(query: str) -> None:
             scrape_ebay_sold(query, max_pages=int(mp) if mp.isdigit() else 5)
 
 
+def _ensure_playwright_browser() -> None:
+    """Install Playwright's Chromium if not present — needed on fresh Railway containers."""
+    pw_env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    search_dir = Path(pw_env) if pw_env else Path.home() / ".cache" / "ms-playwright"
+    if search_dir.exists() and any(search_dir.glob("chromium*")):
+        return
+    print("[playwright] Chromium not found — installing (takes ~60s on first run)...", flush=True)
+    env = dict(os.environ)
+    result = subprocess.run(
+        ["playwright", "install", "chromium", "--with-deps"],
+        env=env,
+    )
+    if result.returncode != 0:
+        print("[playwright] --with-deps failed, retrying without system deps...", flush=True)
+        subprocess.run(["playwright", "install", "chromium"], env=env)
+    print("[playwright] Chromium install done.", flush=True)
+
+
 # ── Non-interactive watch mode (used by GUI subprocesses) ────────────────────
 def _run_watch_cli() -> None:
     """
     Parse --query / --platforms / --interval from sys.argv and run poll().
     No interactive prompts — uses existing eBay sold CSV for threshold.
     """
+    _ensure_playwright_browser()
+
     args = sys.argv[1:]
 
     def _arg(flag: str) -> str | None:
