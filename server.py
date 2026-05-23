@@ -774,7 +774,7 @@ def api_get_data(query: str = ""):
     if not query:
         return []
     rows = []
-    platforms = ["ebay", "vinted", "depop"]
+    platforms = ["ebay", "vinted", "depop", "mercari_jp", "rakuten_jp"]
     sold_median = _load_sold_median(query)
     for plat in platforms:
         prices = _load_platform_prices(query, plat)
@@ -793,7 +793,7 @@ def api_get_queries():
     """Return list of queries that have CSV data on disk."""
     slugs = {}
     for f in DATASETS_DIR.glob("*_new.csv"):
-        for plat in ("ebay", "vinted", "depop"):
+        for plat in ("ebay", "vinted", "depop", "mercari_jp", "rakuten_jp"):
             suffix = f"_{plat}_new.csv"
             if f.name.endswith(suffix):
                 slug = f.name[: -len(suffix)]
