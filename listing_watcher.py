@@ -1481,12 +1481,12 @@ def _ensure_playwright_browser() -> None:
     print("[playwright] Chromium not found — installing (takes ~60s on first run)...", flush=True)
     env = dict(os.environ)
     result = subprocess.run(
-        ["playwright", "install", "chromium", "--with-deps"],
+        [sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
         env=env,
     )
     if result.returncode != 0:
         print("[playwright] --with-deps failed, retrying without system deps...", flush=True)
-        subprocess.run(["playwright", "install", "chromium"], env=env)
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], env=env)
     print("[playwright] Chromium install done.", flush=True)
 
 
