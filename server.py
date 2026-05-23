@@ -30,27 +30,41 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
-# ── Beta code auth ────────────────────────────────────────────────────────────
-# Set BETA_CODES env var as comma-separated codes e.g. "ALPHA01,FRIEND02,VIP03"
-# If not set, auth is disabled (useful for local dev)
-_RAW_CODES = os.environ.get("BETA_CODES", "")
-BETA_CODES: set = {c.strip().upper() for c in _RAW_CODES.split(",") if c.strip()}
+# ── Google OAuth + session auth ───────────────────────────────────────────────
+import httpx
+from itsdangerous import TimestampSigner, BadSignature
 
-OPEN_PATHS = {"/", "/api/auth/verify"}   # always accessible without a code
+GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+SECRET_KEY           = os.environ.get("SECRET_KEY", "dev-secret-please-change")
+APP_URL              = os.environ.get("APP_URL", "http://localhost:8000")
 
-class BetaAuthMiddleware(BaseHTTPMiddleware):
+_signer = TimestampSigner(SECRET_KEY)
+
+def _make_session(email: str) -> str:
+    return _signer.sign(email.encode()).decode()
+
+def _verify_session(cookie: str) -> "str | None":
+    try:
+        return _signer.unsign(cookie.encode(), max_age=60*60*24*30).decode()
+    except BadSignature:
+        return None
+
+OPEN_PATHS = {"/", "/auth/login", "/auth/callback", "/api/auth/verify"}
+
+class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if not BETA_CODES:                          # auth disabled locally
+        if not GOOGLE_CLIENT_ID:          # auth disabled in local dev
             return await call_next(request)
         path = request.url.path
         if path in OPEN_PATHS or path.startswith("/ws"):
             return await call_next(request)
-        code = (
-            request.cookies.get("beta_code") or
-            request.headers.get("X-Beta-Code", "")
-        ).upper()
-        if code not in BETA_CODES:
-            return JSONResponse({"detail": "Invalid beta code"}, status_code=401)
+        session = request.cookies.get("session", "")
+        if not _verify_session(session):
+            if request.headers.get("accept", "").startswith("text/html"):
+                from fastapi.responses import RedirectResponse
+                return RedirectResponse("/auth/login")
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
         return await call_next(request)
 
 # ── Paths (same as gui.py) ────────────────────────────────────────────────────
@@ -363,7 +377,7 @@ def _ts() -> str:
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = FastAPI(title="Unifi")
-app.add_middleware(BetaAuthMiddleware)
+app.add_middleware(AuthMiddleware)
 pm  = ProcessManager()
 
 
@@ -403,19 +417,81 @@ class SettingsIn(BaseModel):
     discord_webhook: str = ""
 
 
-# ── Auth ─────────────────────────────────────────────────────────────────────
-class CodeIn(BaseModel):
-    code: str
+# ── Auth routes ───────────────────────────────────────────────────────────────
+from fastapi.responses import RedirectResponse
+
+@app.get("/auth/login")
+def auth_login():
+    if not GOOGLE_CLIENT_ID:
+        return RedirectResponse("/")
+    import urllib.parse, secrets
+    state  = secrets.token_urlsafe(16)
+    params = urllib.parse.urlencode({
+        "client_id":     GOOGLE_CLIENT_ID,
+        "redirect_uri":  f"{APP_URL}/auth/callback",
+        "response_type": "code",
+        "scope":         "openid email profile",
+        "state":         state,
+        "access_type":   "online",
+    })
+    r = RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{params}")
+    r.set_cookie("oauth_state", state, max_age=600, httponly=True, samesite="lax")
+    return r
+
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request, code: str = "", state: str = ""):
+    saved_state = request.cookies.get("oauth_state", "")
+    if state != saved_state:
+        raise HTTPException(400, "Invalid state")
+
+    async with httpx.AsyncClient() as client:
+        token_r = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code":          code,
+                "client_id":     GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri":  f"{APP_URL}/auth/callback",
+                "grant_type":    "authorization_code",
+            },
+        )
+        token_r.raise_for_status()
+        access_token = token_r.json()["access_token"]
+
+        info_r = await client.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        info_r.raise_for_status()
+        email = info_r.json().get("email", "unknown")
+
+    r = RedirectResponse("/")
+    r.set_cookie("session", _make_session(email),
+                 max_age=60*60*24*30, httponly=True, samesite="lax")
+    r.delete_cookie("oauth_state")
+    return r
+
+
+@app.get("/auth/me")
+def auth_me(request: Request):
+    session = request.cookies.get("session", "")
+    email   = _verify_session(session)
+    if not email:
+        raise HTTPException(401, "Not authenticated")
+    return {"email": email}
+
+
+@app.get("/auth/logout")
+def auth_logout():
+    r = RedirectResponse("/")
+    r.delete_cookie("session")
+    return r
+
 
 @app.post("/api/auth/verify")
-def api_verify(body: CodeIn, response: JSONResponse):
-    from fastapi.responses import JSONResponse as JR
-    code = body.code.strip().upper()
-    if BETA_CODES and code not in BETA_CODES:
-        raise HTTPException(401, "Invalid beta code")
-    r = JR({"ok": True})
-    r.set_cookie("beta_code", code, max_age=60*60*24*30, httponly=True, samesite="lax")
-    return r
+def api_verify_legacy():
+    return {"ok": True}
 
 
 # ── REST: Searches ────────────────────────────────────────────────────────────
