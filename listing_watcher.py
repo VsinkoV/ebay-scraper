@@ -1,0 +1,1287 @@
+#!/usr/bin/env python3
+"""
+Unified New Listing Watcher
+Watches eBay, Vinted and Depop simultaneously for new listings
+and fires a Discord notification the moment one appears.
+
+Usage:
+  python3 listing_watcher.py
+
+Requirements:
+  pip3 install requests
+"""
+
+import base64
+import csv
+import json
+import os
+import re
+import random
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Fix macOS Python 3.13 SSL certificate verification issue
+try:
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE",      certifi.where())
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+except ImportError:
+    pass
+
+import requests
+from playwright.sync_api import sync_playwright, Playwright
+
+# Single shared Playwright instance — only one sync instance allowed per process
+_PW: Playwright | None = None
+
+def _get_pw() -> Playwright:
+    global _PW
+    if _PW is None:
+        _PW = sync_playwright().start()
+    return _PW
+
+def _stop_pw() -> None:
+    global _PW
+    if _PW is not None:
+        try:
+            _PW.stop()
+        except Exception:
+            pass
+        _PW = None
+
+# ── Shared config (mirrors tracker.py) ───────────────────────────────────────
+DISCORD_WEBHOOK = os.environ.get(
+    "UNIFI_DISCORD_WEBHOOK",
+    "https://discord.com/api/webhooks/1478702130100572210/14dADxhvzSmn4_bOxnNAOQG21bkqLDYUjice8aAImOifeZU7E7XArjL_hd_cSBjAlXkj",
+)
+
+EBAY_APP_ID  = os.environ.get("UNIFI_EBAY_APP_ID",  "valeriys-scraping-PRD-69545edfa-2d76aa13")
+EBAY_CERT_ID = os.environ.get("UNIFI_EBAY_CERT_ID", "PRD-9545edfac2c8-d5c3-4a2a-a757-7788")
+
+DATASETS_DIR        = Path("datasets")
+DATASETS_DIR.mkdir(exist_ok=True)
+SAVED_SEARCHES_FILE = DATASETS_DIR / "saved_searches.json"
+THRESHOLDS_FILE     = DATASETS_DIR / "thresholds.json"
+
+POLL_INTERVAL  = 300      # seconds between full poll cycles
+EBAY_MAX       = 200      # results per eBay call (API hard max)
+EBAY_PAGES     = 2        # how many pages to fetch (total up to EBAY_MAX * EBAY_PAGES)
+VINTED_MAX     = 96
+DEPOP_MAX      = 48
+
+# Platform colours for Discord embeds
+COLOURS = {
+    "ebay":   0xE53238,   # eBay red
+    "vinted": 0x007782,   # Vinted teal
+    "depop":  0xFF4040,   # Depop coral
+}
+ICONS = {
+    "ebay":   "🛒",
+    "vinted": "👗",
+    "depop":  "📦",
+}
+
+FIELDNAMES = [
+    "platform", "item_id", "title", "price", "currency",
+    "condition", "brand", "size", "seller", "location",
+    "image_url", "url", "listed_at", "fetched_at", "search_query",
+]
+
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+# ── Keyword relevance filter ──────────────────────────────────────────────────
+_STOP_WORDS = {
+    "a", "an", "the", "and", "or", "for", "in", "on", "of", "with",
+    "by", "from", "to", "at", "is", "it", "its", "s", "mens", "womens",
+    "ladies", "girls", "boys", "unisex", "size", "new", "used",
+}
+
+def _required_terms(query: str) -> list[str]:
+    """
+    Break the query into must-have keywords, stripping noise words.
+    Multi-word brand names are kept as individual tokens so 'AllSaints'
+    (no space) still matches 'all' + 'saints' as substrings.
+    """
+    words = [w.strip("'\"()") for w in query.lower().split()]
+    return [w for w in words if w and w not in _STOP_WORDS and len(w) > 1]
+
+
+def _item_matches(item: dict, terms: list[str]) -> bool:
+    """
+    Return True only if every required term appears somewhere in the
+    listing's title or brand field (case-insensitive substring match).
+    'AllSaints' satisfies both 'all' and 'saints' automatically.
+    """
+    haystack = (
+        (item.get("title") or "") + " " + (item.get("brand") or "")
+    ).lower().replace("-", " ").replace("_", " ")
+
+    return all(term in haystack for term in terms)
+
+
+def filter_results(rows: list[dict], query: str) -> tuple[list[dict], int]:
+    """Filter rows to only those matching the query keywords. Returns (matches, dropped)."""
+    terms = _required_terms(query)
+    if not terms:
+        return rows, 0
+    matched = [r for r in rows if _item_matches(r, terms)]
+    return matched, len(rows) - len(matched)
+
+
+# ── CSV helpers ───────────────────────────────────────────────────────────────
+def csv_path(query: str, platform: str) -> Path:
+    slug = re.sub(r"[^a-z0-9]+", "_", query.lower()).strip("_")
+    return DATASETS_DIR / f"{slug}_{platform}_new.csv"
+
+
+def load_seen_ids(path: Path) -> set:
+    if not path.exists():
+        return set()
+    with open(path, newline="", encoding="utf-8") as f:
+        return {row["item_id"] for row in csv.DictReader(f)}
+
+
+def append_rows(path: Path, rows: list[dict]) -> None:
+    exists = path.exists()
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")
+        if not exists:
+            w.writeheader()
+        w.writerows(rows)
+
+
+# ── eBay sold scraper ────────────────────────────────────────────────────────
+_EBAY_SOLD_URL = (
+    "https://www.ebay.co.uk/sch/i.html"
+    "?_nkw={query}&LH_Complete=1&LH_Sold=1&LH_PrefLoc=1&_pgn={page}"
+)
+_SOLD_FIELDS = ["title", "price", "condition", "date_sold", "url"]
+
+
+def _parse_sold_page(page) -> list[dict]:
+    rows = []
+    for item in page.query_selector_all("li.s-card[data-listingid]"):
+        title_el  = item.query_selector(".s-card__title span")
+        price_el  = item.query_selector(".s-card__price")
+        cond_el   = item.query_selector(".s-card__subtitle span")
+        date_el   = item.query_selector(".s-card__caption span")
+        link_el   = item.query_selector("a.s-card__link")
+
+        price_raw = (price_el.inner_text().strip() if price_el else "")
+        if " to " in price_raw:
+            price_raw = price_raw.split(" to ")[0]
+        price_clean = price_raw.replace("£", "").replace(",", "").strip()
+
+        rows.append({
+            "title":      (title_el.inner_text().strip() if title_el else ""),
+            "price":      price_clean,
+            "condition":  (cond_el.inner_text().strip()  if cond_el  else ""),
+            "date_sold":  (date_el.inner_text().strip()  if date_el  else ""),
+            "url":        (link_el.get_attribute("href") if link_el  else ""),
+        })
+    return rows
+
+
+def scrape_ebay_sold(query: str, max_pages: int = 5, min_records: int = 0) -> float | None:
+    """
+    Scrape eBay UK sold listings, save CSV, return median price.
+    Opens a visible browser window so CAPTCHAs can be solved manually.
+    If min_records > 0 and fewer records are collected, a warning is printed.
+    """
+    slug      = re.sub(r"[^a-z0-9]+", "_", query.lower()).strip("_")
+    sold_path = DATASETS_DIR / f"{slug}_sold.csv"
+
+    print(f"\n  🔍 Scraping eBay UK sold listings for '{query}'...")
+    browser = _get_pw().chromium.launch(
+        headless=False,
+        args=["--disable-blink-features=AutomationControlled"],
+    )
+    ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 800})
+    ctx.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
+    page = ctx.new_page()
+
+    all_rows = []
+    for page_num in range(1, max_pages + 1):
+        url = _EBAY_SOLD_URL.format(query=query.replace(" ", "+"), page=page_num)
+        print(f"  [Page {page_num}] Fetching...")
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_selector(
+                "li.s-card[data-listingid], iframe[title*='challenge']", timeout=30_000
+            )
+        except Exception as e:
+            print(f"  ❌ Page {page_num} error: {e}")
+            break
+
+        if page.query_selector("iframe[title*='challenge']"):
+            print("  ⚠️  CAPTCHA — solve it in the browser window, then press Enter.")
+            try:
+                input()
+            except EOFError:
+                print("  ↻  Non-interactive mode — waiting 60 s for CAPTCHA...")
+                time.sleep(60)
+
+        rows = _parse_sold_page(page)
+        all_rows.extend(rows)
+        print(f"     {len(rows)} listings (total so far: {len(all_rows)})")
+
+        nxt = page.query_selector("a.pagination__next, [aria-label='Go to next search page']")
+        if not nxt or nxt.get_attribute("aria-disabled"):
+            break
+        time.sleep(random.uniform(2, 4))
+
+    browser.close()
+
+    if not all_rows:
+        print("  ❌ No sold listings scraped.")
+        return None
+
+    if min_records > 0 and len(all_rows) < min_records:
+        print(f"  ⚠️  Only {len(all_rows)} records collected — below minimum of {min_records}.")
+        print(f"     Try increasing the Pages setting to collect more data.")
+
+    # Save CSV
+    with open(sold_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=_SOLD_FIELDS)
+        w.writeheader()
+        w.writerows(all_rows)
+    print(f"  💾 Saved {len(all_rows)} records → {sold_path}")
+
+    prices = []
+    for r in all_rows:
+        try:
+            prices.append(float(r["price"]))
+        except ValueError:
+            pass
+
+    if not prices:
+        return None
+
+    prices.sort()
+    median = prices[len(prices) // 2]
+    print(f"  📊 Median: £{median:.2f}  |  Mean: £{sum(prices)/len(prices):.2f}"
+          f"  |  Min: £{min(prices):.2f}  |  Max: £{max(prices):.2f}")
+    return median
+
+
+def load_ebay_threshold(query: str) -> float | None:
+    """Return 50% of the eBay sold median (bargain threshold), or None."""
+    slug = re.sub(r"[^a-z0-9]+", "_", query.lower()).strip("_")
+    path = DATASETS_DIR / f"{slug}_sold.csv"
+    if not path.exists():
+        return None
+    prices = []
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            raw = str(row.get("price", "") or "").replace("£", "").replace(",", "").strip()
+            try:
+                prices.append(float(raw))
+            except ValueError:
+                pass
+    if not prices:
+        return None
+    prices.sort()
+    median    = prices[len(prices) // 2]
+    threshold = round(median * 0.50, 2)
+    print(f"  📊 eBay sold median: £{median:.2f}  →  50% bargain threshold: £{threshold:.2f}"
+          f"  ({len(prices)} records)")
+    return threshold
+
+
+def _load_threshold_config() -> dict:
+    if not THRESHOLDS_FILE.exists():
+        return {}
+    try:
+        with open(THRESHOLDS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def get_effective_threshold(query: str, name: str = None) -> float | None:
+    """Return bargain threshold from thresholds.json config, else 50% of eBay sold median."""
+    cfg        = _load_threshold_config()
+    search_cfg = cfg.get(name or "", cfg.get(query, {}))
+    mode       = search_cfg.get("mode", "percent")
+
+    if mode == "fixed":
+        try:
+            val = float(search_cfg.get("fixed") or 0)
+            if val > 0:
+                print(f"  📊 Custom fixed threshold: £{val:.2f}")
+                return val
+        except (ValueError, TypeError):
+            pass
+
+    # Percent of eBay sold median
+    slug = re.sub(r"[^a-z0-9]+", "_", query.lower()).strip("_")
+    path = DATASETS_DIR / f"{slug}_sold.csv"
+    if not path.exists():
+        return None
+    prices = []
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            raw = str(row.get("price", "") or "").replace("£", "").replace(",", "").strip()
+            try:
+                prices.append(float(raw))
+            except ValueError:
+                pass
+    if not prices:
+        return None
+    prices.sort()
+    median    = prices[len(prices) // 2]
+    pct       = float(search_cfg.get("percent", 50)) / 100
+    threshold = round(median * pct, 2)
+    print(f"  📊 eBay sold median: £{median:.2f}  →  {pct*100:.0f}% threshold: £{threshold:.2f}"
+          f"  ({len(prices)} records)")
+    return threshold
+
+
+# ── Saved searches ────────────────────────────────────────────────────────────
+def load_saved_searches() -> list[dict]:
+    if not SAVED_SEARCHES_FILE.exists():
+        return []
+    try:
+        with open(SAVED_SEARCHES_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_searches(searches: list[dict]) -> None:
+    DATASETS_DIR.mkdir(exist_ok=True)
+    with open(SAVED_SEARCHES_FILE, "w", encoding="utf-8") as f:
+        json.dump(searches, f, indent=2)
+
+
+def add_saved_search(name: str, query: str, platforms: list[str], interval_min: int) -> None:
+    searches = load_saved_searches()
+    # Overwrite if name already exists
+    searches = [s for s in searches if s["name"].lower() != name.lower()]
+    searches.append({
+        "name":         name,
+        "query":        query,
+        "platforms":    platforms,
+        "interval_min": interval_min,
+    })
+    save_searches(searches)
+    print(f"  ✅ Saved search '{name}' stored.")
+
+
+def delete_saved_search(name: str) -> None:
+    searches = load_saved_searches()
+    before = len(searches)
+    searches = [s for s in searches if s["name"].lower() != name.lower()]
+    if len(searches) == before:
+        print(f"  ❌ No saved search named '{name}'.")
+    else:
+        save_searches(searches)
+        print(f"  🗑  Deleted saved search '{name}'.")
+
+
+def multi_poll(watches: list[dict], scrapers: dict) -> None:
+    """
+    Poll multiple saved searches in a round-robin loop.
+    Each watch: {name, query, platforms, interval_min}
+    """
+    # Per-watch state
+    state = []
+    for w in watches:
+        platforms  = w["platforms"]
+        query      = w["query"]
+        interval_s = w.get("interval_min", 5) * 60
+        seen       = {p: load_seen_ids(csv_path(query, p)) for p in platforms}
+        threshold  = get_effective_threshold(query, w.get("name"))
+        exclude    = [kw.lower().strip() for kw in w.get("exclude_keywords", []) if kw.strip()]
+        first_run  = {p: not seen[p] for p in platforms}
+        state.append({
+            "watch":      w,
+            "seen":       seen,
+            "threshold":  threshold,
+            "exclude":    exclude,
+            "first_run":  first_run,
+            "interval_s": interval_s,
+            "next_poll":  0,   # run immediately on first tick
+        })
+        print(f"  📌 '{w['name']}' ({query}) on {', '.join(platforms)}"
+              f" every {w.get('interval_min', 5)} min")
+        if threshold:
+            print(f"     📊 Bargain threshold: £{threshold:.2f}")
+
+    print(f"\n  Monitoring {len(watches)} searches — Ctrl+C to stop\n" + "─" * 60)
+
+    while True:
+        now = time.time()
+        for s in state:
+            if now < s["next_poll"]:
+                continue
+
+            w         = s["watch"]
+            query     = w["query"]
+            platforms = w["platforms"]
+            threshold = s["threshold"]
+            exclude   = s["exclude"]
+            ts        = datetime.now().strftime("%H:%M:%S")
+            print(f"\n[{ts}] '{w['name']}' — checking {', '.join(platforms)}...")
+
+            for platform in platforms:
+                raw_rows         = scrapers[platform].fetch(query)
+                rows, dropped    = filter_results(raw_rows, query)
+                new_rows         = [r for r in rows if r["item_id"] not in s["seen"][platform]]
+                if exclude:
+                    new_rows = [r for r in new_rows
+                                if not any(kw in r.get("title", "").lower() for kw in exclude)]
+
+                if not raw_rows:
+                    print(f"  {ICONS[platform]} {platform:<8} — fetch returned nothing")
+                    time.sleep(random.uniform(1, 3))
+                    continue
+
+                if dropped:
+                    print(f"  {ICONS[platform]} {platform:<8} — {dropped} irrelevant filtered"
+                          f" ({len(rows)} matched)")
+
+                if not rows:
+                    print(f"  {ICONS[platform]} {platform:<8} — no listings matched keywords")
+                    time.sleep(random.uniform(1, 3))
+                    continue
+
+                if new_rows and s["first_run"][platform]:
+                    for r in new_rows:
+                        s["seen"][platform].add(r["item_id"])
+                    append_rows(csv_path(query, platform), new_rows)
+                    priced = sorted(
+                        [r for r in new_rows if _parse_price(r.get("price", "")) != float("inf")],
+                        key=lambda r: _parse_price(r["price"]),
+                    )
+                    print(f"  {ICONS[platform]} {platform.capitalize()} — seeded {len(new_rows)} | cheapest 5:")
+                    for r in priced[:5]:
+                        pval     = _parse_price(r["price"])
+                        btag     = " 🔥" if (threshold and pval < threshold) else ""
+                        size_str = (r.get("size") or "").ljust(7)
+                        print(f"     £{r['price']:>7}  {size_str}  {r['title'][:45]}{btag}")
+                        print(f"              {r['url']}")
+                        send_discord(r, query, threshold=threshold)
+                        time.sleep(0.5)
+                    s["first_run"][platform] = False
+                    time.sleep(random.uniform(1, 3))
+                    continue
+
+                s["first_run"][platform] = False
+
+                # Show current cheapest
+                priced = [r for r in rows if _parse_price(r.get("price", "")) != float("inf")]
+                if priced:
+                    cheapest    = min(priced, key=lambda r: _parse_price(r["price"]))
+                    bargain_tag = " 🔥" if (threshold and _parse_price(cheapest["price"]) < threshold) else ""
+                    print(f"  {ICONS[platform]} {platform:<8} — cheapest: "
+                          f"£{cheapest['price']}  {cheapest.get('size') or '':>6}  "
+                          f"{cheapest['title'][:40]}{bargain_tag}")
+
+                if new_rows:
+                    append_rows(csv_path(query, platform), new_rows)
+                    for r in new_rows:
+                        s["seen"][platform].add(r["item_id"])
+                    print(f"  {ICONS[platform]} {platform:<8} — ✅ {len(new_rows)} NEW")
+                    for r in new_rows:
+                        price   = f"£{r['price']}" if r["price"] else "?"
+                        pval    = _parse_price(r.get("price", ""))
+                        bargain = " 🔥 BARGAIN" if (threshold and pval < threshold) else ""
+                        print(f"     {price:>8}  {r['title'][:55]}{bargain}")
+                        print(f"             {r['url']}")
+                        send_discord(r, query, threshold=threshold)
+                        if threshold and pval < threshold:
+                            print("BARGAIN_ITEM:" + json.dumps({
+                                "platform": platform, "title": r["title"],
+                                "price": r["price"], "url": r.get("url", ""),
+                                "image_url": r.get("image_url", ""),
+                                "savings": round(threshold - pval, 2), "query": query,
+                            }), flush=True)
+                        time.sleep(0.5)
+                else:
+                    print(f"  {ICONS[platform]} {platform:<8} — no new listings")
+
+                time.sleep(random.uniform(1, 3))
+
+            s["next_poll"] = time.time() + s["interval_s"]
+
+        time.sleep(10)  # check every 10s whether any watch is due
+
+
+# ── Analyse saved listings ─────────────────────────────────────────────────────
+def _parse_price(val: str) -> float:
+    try:
+        return float(str(val or "").replace("£", "").replace(",", "").strip())
+    except ValueError:
+        return float("inf")
+
+
+def analyse_listings(query: str, platform: str) -> None:
+    path = csv_path(query, platform)
+    if not path.exists():
+        print(f"\n  No data file found: {path}")
+        print(f"  Run the watcher first to seed listings.")
+        return
+
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    if not rows:
+        print(f"\n  CSV is empty: {path}")
+        return
+
+    rows.sort(key=lambda r: _parse_price(r.get("price", "")))
+
+    print(f"\n  {len(rows)} listings on {platform.capitalize()} — cheapest first\n")
+    print(f"  {'Price':>8}  {'Size':<8}  {'Condition':<22}  Title")
+    print("  " + "─" * 85)
+    for r in rows:
+        price = f"£{r['price']}" if r.get("price") else "?"
+        size  = (r.get("size") or "—")[:8]
+        cond  = (r.get("condition") or "—")[:22]
+        title = (r.get("title") or "")[:48]
+        print(f"  {price:>8}  {size:<8}  {cond:<22}  {title}")
+
+    valid = [_parse_price(r.get("price", "")) for r in rows
+             if _parse_price(r.get("price", "")) != float("inf")]
+    if valid:
+        print(f"\n  Min: £{min(valid):.2f}  |  "
+              f"Max: £{max(valid):.2f}  |  "
+              f"Mean: £{sum(valid)/len(valid):.2f}  |  "
+              f"Median: £{sorted(valid)[len(valid)//2]:.2f}")
+
+    # Show eBay sold threshold comparison if available
+    threshold = load_ebay_threshold(query)
+    if threshold:
+        below = [r for r in rows if _parse_price(r.get("price","")) < threshold]
+        print(f"\n  🔥 {len(below)} listings are BELOW the eBay sold median of £{threshold:.2f}:")
+        for r in below[:10]:
+            savings = threshold - _parse_price(r["price"])
+            print(f"     £{r['price']:>7}  saves ~£{savings:.2f}  {r.get('title','')[:55]}")
+            print(f"              {r.get('url','')}")
+
+
+# ── Discord ───────────────────────────────────────────────────────────────────
+def send_discord(item: dict, query: str, threshold: float | None = None) -> None:
+    if not DISCORD_WEBHOOK:
+        return
+    platform = item["platform"]
+    price    = f"£{item['price']}" if item["price"] else "?"
+
+    price_val = _parse_price(item.get("price", ""))
+    is_bargain = (
+        threshold is not None
+        and price_val != float("inf")
+        and price_val < threshold
+    )
+
+    fields = [
+        {"name": "💰 Price",     "value": price,                          "inline": True},
+        {"name": "🏷 Condition", "value": item.get("condition") or "—",   "inline": True},
+        {"name": "📐 Size",      "value": item.get("size") or "—",        "inline": True},
+        {"name": "🏷 Brand",     "value": item.get("brand") or "—",       "inline": True},
+        {"name": "👤 Seller",    "value": item.get("seller") or "—",      "inline": True},
+        {"name": "📍 Location",  "value": item.get("location") or "—",    "inline": True},
+        {"name": "🔗 Link",      "value": item.get("url") or "—",         "inline": False},
+    ]
+    if is_bargain:
+        savings = threshold - price_val
+        fields.append({
+            "name":   "🔥 vs eBay Sold Median",
+            "value":  f"£{price_val:.2f} vs £{threshold:.2f} median — saves ~£{savings:.2f}",
+            "inline": False,
+        })
+
+    embed_title = (
+        f"🔥 BARGAIN — {ICONS[platform]} New on {platform.capitalize()}"
+        if is_bargain
+        else f"{ICONS[platform]} New listing on {platform.capitalize()}"
+    )
+    colour = 0x00C853 if is_bargain else COLOURS[platform]   # bright green for bargains
+
+    payload = {
+        "embeds": [{
+            "title":       embed_title,
+            "description": f"**{item.get('title', '')}**",
+            "color":       colour,
+            "fields":      fields,
+            "footer": {
+                "text": (
+                    f"{platform.capitalize()} Watcher  •  "
+                    f"{datetime.now().strftime('%d %b %Y %H:%M')}  |  "
+                    f"Search: {query}"
+                )
+            },
+        }]
+    }
+    try:
+        r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+        if r.status_code == 204:
+            bargain_tag = "  🔥 BARGAIN ALERT" if is_bargain else ""
+            print(f"     🔔 Discord sent{bargain_tag}")
+        else:
+            print(f"     ⚠️  Discord error {r.status_code}")
+    except Exception as e:
+        print(f"     ⚠️  Discord error: {e}")
+
+
+# ── eBay (Browse API) ─────────────────────────────────────────────────────────
+class EbayScraper:
+    TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token"
+    SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
+
+    def __init__(self):
+        self._token = None
+        self._token_exp = 0
+        self.session = requests.Session()
+
+    def _get_token(self) -> str:
+        if self._token and time.time() < self._token_exp - 60:
+            return self._token
+        creds = base64.b64encode(
+            f"{EBAY_APP_ID}:{EBAY_CERT_ID}".encode()
+        ).decode()
+        r = self.session.post(
+            self.TOKEN_URL,
+            headers={"Authorization": f"Basic {creds}",
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            data={"grant_type": "client_credentials",
+                  "scope": "https://api.ebay.com/oauth/api_scope"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        d = r.json()
+        self._token     = d["access_token"]
+        self._token_exp = time.time() + int(d.get("expires_in", 7200))
+        return self._token
+
+    def fetch(self, query: str) -> list[dict]:
+        try:
+            token = self._get_token()
+        except Exception as e:
+            print(f"  ❌ eBay token error: {e}")
+            return []
+
+        headers = {
+            "Authorization":           f"Bearer {token}",
+            "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB",
+        }
+        items = []
+        for page in range(EBAY_PAGES):
+            params = {
+                "q":      query,
+                "limit":  EBAY_MAX,
+                "offset": page * EBAY_MAX,
+                "sort":   "newlyListed",
+                "filter": "itemLocationCountry:GB",
+            }
+            try:
+                r = self.session.get(self.SEARCH_URL, headers=headers,
+                                     params=params, timeout=15)
+                if r.status_code == 429:
+                    print("  ⚠️  eBay rate limited — stopping pagination")
+                    break
+                r.raise_for_status()
+                page_items = r.json().get("itemSummaries", [])
+                items.extend(page_items)
+                if len(page_items) < EBAY_MAX:
+                    break  # fewer results than requested — no more pages
+            except Exception as e:
+                print(f"  ❌ eBay fetch error (page {page}): {e}")
+                break
+
+        results = []
+        for it in items:
+            try:
+                price_d  = it.get("price", {})
+                location = it.get("itemLocation", {})
+                loc_str  = ", ".join(filter(None, [
+                    location.get("city", ""), location.get("country", "")
+                ]))
+                results.append({
+                    "platform":     "ebay",
+                    "item_id":      it.get("itemId", ""),
+                    "title":        it.get("title", "").strip(),
+                    "price":        price_d.get("value", ""),
+                    "currency":     price_d.get("currency", "GBP"),
+                    "condition":    it.get("condition", ""),
+                    "brand":        "",
+                    "size":         "",
+                    "seller":       it.get("seller", {}).get("username", ""),
+                    "location":     loc_str,
+                    "url":          it.get("itemWebUrl", ""),
+                    "listed_at":    it.get("listingStartedAt", ""),
+                    "fetched_at":   datetime.now(timezone.utc).isoformat(),
+                    "search_query": query,
+                })
+            except Exception:
+                continue
+        return results
+
+
+# ── Vinted (Playwright) ───────────────────────────────────────────────────────
+class VintedScraper:
+    BASE = "https://www.vinted.co.uk"
+
+    def __init__(self):
+        self._browser = _get_pw().chromium.launch(headless=True)
+        self._ctx     = self._browser.new_context(
+            locale="en-GB",
+            user_agent=UA,
+        )
+        # Seed cookies by visiting homepage once
+        page = self._ctx.new_page()
+        try:
+            page.goto(self.BASE, wait_until="domcontentloaded", timeout=20_000)
+        except Exception:
+            pass
+        finally:
+            page.close()
+        print(f"  {ICONS['vinted']} Vinted browser ready")
+
+    def fetch(self, query: str) -> list[dict]:
+        url = f"{self.BASE}/api/v2/catalog/items"
+        params = f"search_text={requests.utils.quote(query)}&order=newest_first&per_page={VINTED_MAX}"
+        try:
+            resp = self._ctx.request.get(
+                f"{url}?{params}",
+                headers={
+                    "Accept":          "application/json, text/plain, */*",
+                    "Referer":         f"{self.BASE}/",
+                    "sec-fetch-dest":  "empty",
+                    "sec-fetch-mode":  "cors",
+                    "sec-fetch-site":  "same-origin",
+                },
+                timeout=20_000,
+            )
+            items = resp.json().get("items", [])
+        except Exception as e:
+            print(f"  ❌ Vinted fetch error: {e}")
+            return []
+
+        results = []
+        for it in items:
+            try:
+                price_d = it.get("price", {}) or {}
+                user    = it.get("user", {})  or {}
+                results.append({
+                    "platform":     "vinted",
+                    "item_id":      str(it.get("id", "")),
+                    "title":        it.get("title", "").strip(),
+                    "price":        price_d.get("amount", it.get("price", "")),
+                    "currency":     price_d.get("currency_code", "GBP"),
+                    "condition":    it.get("status", ""),
+                    "brand":        it.get("brand_title", ""),
+                    "size":         it.get("size_title", ""),
+                    "seller":       user.get("login", ""),
+                    "location":     user.get("city", "") or it.get("city", ""),
+                    "url":          (f"{self.BASE}/items/{it.get('id')}-{it.get('slug','')}"
+                                    ).rstrip("-"),
+                    "image_url":    (it.get("photos") or [{}])[0].get("url", ""),
+                    "listed_at":    it.get("created_at_ts", ""),
+                    "fetched_at":   datetime.now(timezone.utc).isoformat(),
+                    "search_query": query,
+                })
+            except Exception:
+                continue
+        return results
+
+    def close(self):
+        try:
+            self._browser.close()
+        except Exception:
+            pass
+
+
+# ── Depop (Playwright DOM scraping) ──────────────────────────────────────────
+class DepopScraper:
+    WEB_BASE = "https://www.depop.com"
+
+    # JS extracts cards from the product grid.
+    # Uses progressively broader selectors so it survives CSS-module class renames.
+    _JS = r"""() => {
+        const sizeRe = /^(UK|EU|US|One)/i;
+
+        // 1) Exact known class
+        let items = Array.from(document.querySelectorAll('li[class*="listItem"]'));
+        // 2) Any ul that looks like a product grid
+        if (items.length < 3) {
+            items = Array.from(document.querySelectorAll(
+                'ul[class*="productList"] li, ul[class*="ProductList"] li, ul[class*="grid"] li'
+            ));
+        }
+        // 3) Any li that contains a /products/ link
+        if (items.length < 3) {
+            items = Array.from(document.querySelectorAll('li')).filter(
+                li => li.querySelector("a[href*='/products/']")
+            );
+        }
+
+        return items.map(li => {
+            const link   = li.querySelector("a[href*='/products/']");
+            const spans  = li.querySelectorAll('p, span');
+            const texts  = Array.from(spans).map(s => s.innerText.trim()).filter(t => t.length > 0);
+            const prices = texts.filter(t => t.startsWith('\u00a3'));
+            const sizes  = texts.filter(t => sizeRe.test(t));
+            const brands = texts.filter(t =>
+                t.length > 1 && !t.startsWith('\u00a3') && !sizeRe.test(t) && t.indexOf(' ') === -1
+            );
+            const imgEl = li.querySelector('img');
+            return {
+                href:  link ? link.href : null,
+                price: prices[0] || null,
+                size:  sizes[0]  || null,
+                brand: brands[0] || null,
+                img:   imgEl ? imgEl.src : null,
+            };
+        }).filter(p => p.href);
+    }"""
+
+    def __init__(self):
+        self._browser = _get_pw().chromium.launch(headless=True)
+        self._ctx     = self._browser.new_context(locale="en-GB", user_agent=UA)
+        self._page    = self._ctx.new_page()
+        print(f"  {ICONS['depop']} Depop browser ready")
+
+    def fetch(self, query: str) -> list[dict]:
+        url = (
+            f"{self.WEB_BASE}/search/"
+            f"?q={requests.utils.quote(query)}&sort=NewestFirst"
+        )
+        try:
+            self._page.goto(url, wait_until="networkidle", timeout=30_000)
+            # Incrementally scroll to trigger infinite-scroll / lazy loading
+            for fraction in [0.25, 0.5, 0.75, 1.0, 1.0]:
+                self._page.evaluate(
+                    f"window.scrollTo(0, document.body.scrollHeight * {fraction})"
+                )
+                self._page.wait_for_timeout(900)
+            cards = self._page.evaluate(self._JS)
+        except Exception as e:
+            print(f"  ❌ Depop fetch error: {e}")
+            return []
+
+        results = []
+        for card in cards:
+            try:
+                href = card["href"] or ""
+                # Slug is the last path segment: /products/{slug}/
+                slug = href.rstrip("/").split("/")[-1]
+                # Seller is the leading word(s) before the first recognised item-title word
+                # URL pattern: /{seller}-{title-words}-{4-char-hash}/
+                parts = slug.split("-")
+                seller = parts[0] if parts else ""
+                # Title: slug without seller prefix and 4-char hex suffix, dashes→spaces
+                title_parts = parts[1:-1] if len(parts) > 2 else parts
+                title = " ".join(title_parts).title()
+                # Price: strip £ symbol
+                raw_price = (card.get("price") or "").replace("£", "").replace(",", "").strip()
+
+                results.append({
+                    "platform":     "depop",
+                    "item_id":      slug,
+                    "title":        title[:120],
+                    "price":        raw_price,
+                    "currency":     "GBP",
+                    "condition":    "",
+                    "brand":        card.get("brand") or "",
+                    "size":         card.get("size") or "",
+                    "seller":       seller,
+                    "location":     "",
+                    "image_url":    card.get("img") or "",
+                    "url":          href,
+                    "listed_at":    "",
+                    "fetched_at":   datetime.now(timezone.utc).isoformat(),
+                    "search_query": query,
+                })
+            except Exception:
+                continue
+        return results
+
+    def close(self):
+        try:
+            self._browser.close()
+        except Exception:
+            pass
+
+
+# ── Poll loop ─────────────────────────────────────────────────────────────────
+def poll(query: str, platforms: list[str], scrapers: dict, name: str = None, exclude_keywords: list = None) -> None:
+    seen      = {p: load_seen_ids(csv_path(query, p)) for p in platforms}
+    threshold = get_effective_threshold(query, name)
+    exclude   = [kw.lower().strip() for kw in (exclude_keywords or []) if kw.strip()]
+
+    print(f"\n  Watching: '{query}'")
+    for p in platforms:
+        print(f"  {ICONS[p]} {p.capitalize():<8} — {len(seen[p])} known IDs loaded")
+    if threshold:
+        print(f"  📊 Bargain alert: flag listings at or below £{threshold:.2f}")
+    if exclude:
+        print(f"  🚫 Excluding keywords: {', '.join(exclude)}")
+    print(f"\n  Polling every {POLL_INTERVAL // 60} min  |  Ctrl+C to stop\n")
+    print("─" * 60)
+
+    # First run: silently load existing IDs without alerting
+    first_run = {p: not seen[p] for p in platforms}  # True if nothing cached yet
+
+    while True:
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"\n[{ts}] Checking all platforms...")
+
+        for platform in platforms:
+            raw_rows         = scrapers[platform].fetch(query)
+            rows, dropped    = filter_results(raw_rows, query)
+            new_rows         = [r for r in rows if r["item_id"] not in seen[platform]]
+            if exclude:
+                new_rows = [r for r in new_rows
+                            if not any(kw in r.get("title", "").lower() for kw in exclude)]
+
+            if not raw_rows:
+                print(f"  {ICONS[platform]} {platform:<8} — fetch returned nothing")
+                time.sleep(random.uniform(2, 4))
+                continue
+
+            if dropped:
+                print(f"  {ICONS[platform]} {platform:<8} — {dropped} irrelevant listings filtered out"
+                      f" ({len(rows)} matched query keywords)")
+
+            if not rows:
+                print(f"  {ICONS[platform]} {platform:<8} — no listings matched keywords")
+                time.sleep(random.uniform(2, 4))
+                continue
+
+            if new_rows and first_run[platform]:
+                # First ever run — seed the cache, don't Discord blast
+                for r in new_rows:
+                    seen[platform].add(r["item_id"])
+                append_rows(csv_path(query, platform), new_rows)
+                priced = sorted(
+                    [r for r in new_rows if _parse_price(r.get("price","")) != float("inf")],
+                    key=lambda r: _parse_price(r["price"])
+                )
+                print(f"  {ICONS[platform]} {platform.capitalize()} — seeded {len(new_rows)} listings  |  cheapest 5:")
+                for r in priced[:5]:
+                    pval       = _parse_price(r["price"])
+                    btag       = " 🔥" if (threshold and pval < threshold) else ""
+                    size_str   = (r.get("size") or "").ljust(7)
+                    print(f"     £{r['price']:>7}  {size_str}  {r['title'][:45]}{btag}")
+                    print(f"              {r['url']}")
+                    send_discord(r, query, threshold=threshold)
+                    if threshold and pval < threshold:
+                        print("BARGAIN_ITEM:" + json.dumps({
+                            "platform": platform, "title": r["title"],
+                            "price": r["price"], "url": r.get("url", ""),
+                            "image_url": r.get("image_url", ""),
+                            "savings": round(threshold - pval, 2), "query": query,
+                        }), flush=True)
+                    time.sleep(0.5)
+                first_run[platform] = False
+                time.sleep(random.uniform(2, 4))
+                continue
+
+            first_run[platform] = False
+
+            # Show cheapest listing currently on the platform
+            priced = [r for r in rows if _parse_price(r.get("price", "")) != float("inf")]
+            if priced:
+                cheapest = min(priced, key=lambda r: _parse_price(r["price"]))
+                bargain_tag = " 🔥" if (threshold and _parse_price(cheapest["price"]) < threshold) else ""
+                print(f"  {ICONS[platform]} {platform:<8} — cheapest: "
+                      f"£{cheapest['price']}  {cheapest.get('size') or '':>6}  "
+                      f"{cheapest['title'][:40]}{bargain_tag}")
+                print(f"             {cheapest['url']}")
+
+            if new_rows:
+                append_rows(csv_path(query, platform), new_rows)
+                for r in new_rows:
+                    seen[platform].add(r["item_id"])
+                print(f"  {ICONS[platform]} {platform:<8} — ✅ {len(new_rows)} NEW")
+                for r in new_rows:
+                    price     = f"£{r['price']}" if r["price"] else "?"
+                    pval      = _parse_price(r.get("price", ""))
+                    bargain   = " 🔥 BARGAIN" if (threshold and pval < threshold) else ""
+                    print(f"     {price:>8}  {r['title'][:55]}{bargain}")
+                    print(f"             {r['url']}")
+                    send_discord(r, query, threshold=threshold)
+                    if threshold and pval < threshold:
+                        print("BARGAIN_ITEM:" + json.dumps({
+                            "platform": platform, "title": r["title"],
+                            "price": r["price"], "url": r.get("url", ""),
+                            "image_url": r.get("image_url", ""),
+                            "savings": round(threshold - pval, 2), "query": query,
+                        }), flush=True)
+                    time.sleep(0.5)
+            else:
+                print(f"  {ICONS[platform]} {platform:<8} — no new listings")
+
+            time.sleep(random.uniform(2, 4))
+
+        print(f"\n  Sleeping {POLL_INTERVAL // 60} min...")
+        time.sleep(POLL_INTERVAL)
+
+
+# ── CLI helpers ───────────────────────────────────────────────────────────────
+def _platform_menu() -> list[str]:
+    print("\n  Platforms:")
+    print("  [1] eBay only")
+    print("  [2] Vinted only")
+    print("  [3] Depop only")
+    print("  [4] Vinted + Depop")
+    print("  [5] All three  (default)\n")
+    choice = input("  Choice [5]: ").strip() or "5"
+    return {
+        "1": ["ebay"],
+        "2": ["vinted"],
+        "3": ["depop"],
+        "4": ["vinted", "depop"],
+        "5": ["ebay", "vinted", "depop"],
+    }.get(choice, ["ebay", "vinted", "depop"])
+
+
+def _ensure_scrapers(platforms: list[str], scrapers: dict) -> None:
+    if "ebay"   in platforms and "ebay"   not in scrapers:
+        scrapers["ebay"]   = EbayScraper();  print(f"  {ICONS['ebay']} eBay ready")
+    if "vinted" in platforms and "vinted" not in scrapers:
+        scrapers["vinted"] = VintedScraper()
+    if "depop"  in platforms and "depop"  not in scrapers:
+        scrapers["depop"]  = DepopScraper()
+
+
+def _ebay_sold_flow(query: str) -> None:
+    slug     = re.sub(r"[^a-z0-9]+", "_", query.lower()).strip("_")
+    sold_csv = DATASETS_DIR / f"{slug}_sold.csv"
+    if sold_csv.exists():
+        refresh = input(f"\n  eBay sold data found ({sold_csv.name}). Refresh it? [y/N]: ").strip().lower()
+        if refresh == "y":
+            mp = input("  Max pages [5]: ").strip()
+            scrape_ebay_sold(query, max_pages=int(mp) if mp.isdigit() else 5)
+    else:
+        print(f"\n  No eBay sold data for '{query}'.")
+        ans = input("  Scrape eBay sold prices now for bargain detection? [Y/n]: ").strip().lower()
+        if ans != "n":
+            mp = input("  Max pages [5]: ").strip()
+            scrape_ebay_sold(query, max_pages=int(mp) if mp.isdigit() else 5)
+
+
+# ── Non-interactive watch mode (used by GUI subprocesses) ────────────────────
+def _run_watch_cli() -> None:
+    """
+    Parse --query / --platforms / --interval from sys.argv and run poll().
+    No interactive prompts — uses existing eBay sold CSV for threshold.
+    """
+    args = sys.argv[1:]
+
+    def _arg(flag: str) -> str | None:
+        try:
+            return args[args.index(flag) + 1]
+        except (ValueError, IndexError):
+            return None
+
+    query        = _arg("--query") or ""
+    plat_str     = _arg("--platforms") or "vinted,depop"
+    interval_min = int(_arg("--interval") or "5")
+    name         = _arg("--name") or query
+    exclude_str  = _arg("--exclude") or ""
+    platforms    = [p.strip() for p in plat_str.split(",") if p.strip() in COLOURS]
+    exclude_kws  = [kw.strip() for kw in exclude_str.split(",") if kw.strip()]
+
+    if not query or not platforms:
+        print("Usage: --watch --query QUERY [--platforms p1,p2] [--interval N] [--name NAME] [--exclude kw1,kw2]")
+        return
+
+    global POLL_INTERVAL
+    POLL_INTERVAL = interval_min * 60
+
+    print(f"[WATCH] '{query}'  platforms={platforms}  interval={interval_min}m", flush=True)
+
+    scrapers: dict = {}
+    _ensure_scrapers(platforms, scrapers)
+
+    try:
+        poll(query, platforms, scrapers, name=name, exclude_keywords=exclude_kws)
+    finally:
+        for name in ("vinted", "depop"):
+            if name in scrapers:
+                scrapers[name].close()
+        _stop_pw()
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+def main():
+    # ── GUI subprocess watch mode ──
+    if "--watch" in sys.argv:
+        _run_watch_cli()
+        return
+
+    # ── Scrape eBay sold data (non-interactive) ──
+    if "--scrape-sold" in sys.argv:
+        args = sys.argv[1:]
+        def _arg(flag):
+            try:
+                return args[args.index(flag) + 1]
+            except (ValueError, IndexError):
+                return None
+        query       = _arg("--query") or ""
+        pages       = int(_arg("--pages") or "5")
+        min_records = int(_arg("--min-records") or "0")
+        if not query:
+            print("Usage: --scrape-sold --query QUERY [--pages N] [--min-records N]")
+            return
+        scrape_ebay_sold(query, max_pages=pages, min_records=min_records)
+        return
+
+    # ── Analyse mode: python3 listing_watcher.py --analyse ──
+    if "--analyse" in sys.argv:
+        print("\n  ╔══════════════════════════════╗")
+        print("  ║   Listing Analyser            ║")
+        print("  ╚══════════════════════════════╝\n")
+        query = input("  Search query (used to find CSV): ").strip()
+        if not query:
+            print("  No query entered.")
+            return
+        print("\n  Platform:")
+        print("  [1] Vinted  (default)")
+        print("  [2] Depop")
+        print("  [3] eBay\n")
+        p_choice = input("  Choice [1]: ").strip() or "1"
+        platform = {"1": "vinted", "2": "depop", "3": "ebay"}.get(p_choice, "vinted")
+        analyse_listings(query, platform)
+        return
+
+    print("\n  ╔══════════════════════════════════════════╗")
+    print("  ║   New Listing Watcher — eBay/Vinted/Depop ║")
+    print("  ╚══════════════════════════════════════════╝\n")
+
+    scrapers: dict = {}
+
+    while True:
+        searches = load_saved_searches()
+
+        print("\n  ── Main Menu ──────────────────────────────")
+        print("  [1] Start new watch")
+        print("  [2] Run a saved search")
+        print("  [3] Run ALL saved searches")
+        print("  [4] Save current / add a search")
+        print("  [5] Delete a saved search")
+        print("  [6] Analyse listings (cheapest first)")
+        print("  [0] Quit\n")
+
+        if searches:
+            print(f"  Saved searches ({len(searches)}):")
+            for i, s in enumerate(searches, 1):
+                print(f"    [{i}] {s['name']:20}  {s['query']:30}"
+                      f"  {', '.join(s['platforms'])}  every {s['interval_min']} min")
+        else:
+            print("  (No saved searches yet)")
+
+        choice = input("\n  Choice: ").strip()
+
+        # ── 0. Quit ──────────────────────────────────────────────────────────
+        if choice == "0":
+            break
+
+        # ── 1. Start new watch ───────────────────────────────────────────────
+        elif choice == "1":
+            query = input("\n  Search query: ").strip()
+            if not query:
+                continue
+            _ebay_sold_flow(query)
+            platforms = _platform_menu()
+            interval  = input(f"\n  Poll interval in minutes [5]: ").strip()
+            interval_min = int(interval) if interval.isdigit() else 5
+            global POLL_INTERVAL
+            POLL_INTERVAL = interval_min * 60
+
+            print("\n  Initialising scrapers...")
+            _ensure_scrapers(platforms, scrapers)
+
+            try:
+                poll(query, platforms, scrapers)
+            except (KeyboardInterrupt, EOFError):
+                print("\n\n  👋 Stopped.\n")
+
+        # ── 2. Run a saved search ────────────────────────────────────────────
+        elif choice == "2":
+            if not searches:
+                print("  No saved searches.")
+                continue
+            idx = input("  Enter number of saved search to run: ").strip()
+            try:
+                w = searches[int(idx) - 1]
+            except (ValueError, IndexError):
+                print("  Invalid number.")
+                continue
+            _ebay_sold_flow(w["query"])
+            POLL_INTERVAL = w["interval_min"] * 60
+            print("\n  Initialising scrapers...")
+            _ensure_scrapers(w["platforms"], scrapers)
+            try:
+                poll(w["query"], w["platforms"], scrapers)
+            except (KeyboardInterrupt, EOFError):
+                print("\n\n  👋 Stopped.\n")
+
+        # ── 3. Run ALL saved searches ────────────────────────────────────────
+        elif choice == "3":
+            if not searches:
+                print("  No saved searches.")
+                continue
+            all_platforms = list({p for w in searches for p in w["platforms"]})
+            print("\n  Initialising scrapers for all searches...")
+            _ensure_scrapers(all_platforms, scrapers)
+            try:
+                multi_poll(searches, scrapers)
+            except (KeyboardInterrupt, EOFError):
+                print("\n\n  👋 Stopped.\n")
+
+        # ── 4. Save / add a search ───────────────────────────────────────────
+        elif choice == "4":
+            name  = input("\n  Name for this search: ").strip()
+            if not name:
+                continue
+            query = input("  Search query: ").strip()
+            if not query:
+                continue
+            platforms = _platform_menu()
+            interval  = input("\n  Poll interval in minutes [5]: ").strip()
+            interval_min = int(interval) if interval.isdigit() else 5
+            add_saved_search(name, query, platforms, interval_min)
+
+        # ── 5. Delete a saved search ─────────────────────────────────────────
+        elif choice == "5":
+            if not searches:
+                print("  No saved searches.")
+                continue
+            name = input("  Name to delete: ").strip()
+            delete_saved_search(name)
+
+        # ── 6. Analyse ────────────────────────────────────────────────────────
+        elif choice == "6":
+            query = input("\n  Search query (used to find CSV): ").strip()
+            if not query:
+                continue
+            print("\n  Platform:")
+            print("  [1] Vinted  (default)")
+            print("  [2] Depop")
+            print("  [3] eBay\n")
+            p_choice = input("  Choice [1]: ").strip() or "1"
+            platform = {"1": "vinted", "2": "depop", "3": "ebay"}.get(p_choice, "vinted")
+            analyse_listings(query, platform)
+
+    for name in ("vinted", "depop"):
+        if name in scrapers:
+            scrapers[name].close()
+    _stop_pw()
+    print("\n  👋 Goodbye.\n")
+
+
+if __name__ == "__main__":
+    main()
