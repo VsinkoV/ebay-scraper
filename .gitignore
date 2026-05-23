@@ -13,8 +13,16 @@ debug_timeout_p1.png
 form_debug.html
 form_debug2.html
 
-# Unrelated files
+# Unrelated / desktop-only files
 analysis.pdf
 cold_war_crisis.py
 fluid_sim.py
 fluid_sim_3d.py
+analyse.py
+debug_form.py
+form_filler.py
+marketplace_scraper.py
+tracker.py
+trackers.json
+visualise.py
+gui.py
