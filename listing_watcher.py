@@ -1021,46 +1021,6 @@ class DepopScraper:
         "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
     )
 
-    # JS extracts cards from the product grid.
-    # Uses progressively broader selectors so it survives CSS-module class renames.
-    _JS = r"""() => {
-        const sizeRe = /^(UK|EU|US|One)/i;
-
-        // 1) Exact known class
-        let items = Array.from(document.querySelectorAll('li[class*="listItem"]'));
-        // 2) Any ul that looks like a product grid
-        if (items.length < 3) {
-            items = Array.from(document.querySelectorAll(
-                'ul[class*="productList"] li, ul[class*="ProductList"] li, ul[class*="grid"] li'
-            ));
-        }
-        // 3) Any li that contains a /products/ link
-        if (items.length < 3) {
-            items = Array.from(document.querySelectorAll('li')).filter(
-                li => li.querySelector("a[href*='/products/']")
-            );
-        }
-
-        return items.map(li => {
-            const link   = li.querySelector("a[href*='/products/']");
-            const spans  = li.querySelectorAll('p, span');
-            const texts  = Array.from(spans).map(s => s.innerText.trim()).filter(t => t.length > 0);
-            const prices = texts.filter(t => t.startsWith('\u00a3'));
-            const sizes  = texts.filter(t => sizeRe.test(t));
-            const brands = texts.filter(t =>
-                t.length > 1 && !t.startsWith('\u00a3') && !sizeRe.test(t) && t.indexOf(' ') === -1
-            );
-            const imgEl = li.querySelector('img');
-            return {
-                href:  link ? link.href : null,
-                price: prices[0] || null,
-                size:  sizes[0]  || null,
-                brand: brands[0] || null,
-                img:   imgEl ? imgEl.src : null,
-            };
-        }).filter(p => p.href);
-    }"""
-
     def __init__(self):
         self._browser = _get_pw().chromium.launch(
             headless=True,
@@ -1072,53 +1032,56 @@ class DepopScraper:
         print(f"  {ICONS['depop']} Depop browser ready")
 
     def fetch(self, query: str) -> list[dict]:
-        url = (
-            f"{self.WEB_BASE}/search/"
-            f"?q={requests.utils.quote(query)}&sort=NewestFirst"
-        )
+        api_items: list[dict] = []
+
+        def _on_response(resp):
+            if "webapi.depop.com" in resp.url and resp.status == 200:
+                try:
+                    data = resp.json()
+                    products = data.get("products") or data.get("items") or []
+                    if isinstance(products, list):
+                        api_items.extend(products)
+                except Exception:
+                    pass
+
+        self._page.on("response", _on_response)
+        url = f"{self.WEB_BASE}/search/?q={requests.utils.quote(query)}&sort=NewestFirst"
         try:
             self._page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            self._page.wait_for_timeout(3000)
-            # Incrementally scroll to trigger infinite-scroll / lazy loading
-            for fraction in [0.25, 0.5, 0.75, 1.0, 1.0]:
-                self._page.evaluate(
-                    f"window.scrollTo(0, document.body.scrollHeight * {fraction})"
-                )
-                self._page.wait_for_timeout(800)
-            cards = self._page.evaluate(self._JS)
+            self._page.wait_for_timeout(4000)
         except Exception as e:
-            print(f"  ❌ Depop fetch error: {e}")
+            print(f"  \u274c Depop fetch error: {e}")
+        finally:
+            self._page.remove_listener("response", _on_response)
+
+        if not api_items:
+            print(f"  \u274c Depop — no API response intercepted")
             return []
 
+        print(f"  {ICONS['depop']} Depop — {len(api_items)} items via API")
         results = []
-        for card in cards:
+        for item in api_items:
             try:
-                href = card["href"] or ""
-                # Slug is the last path segment: /products/{slug}/
-                slug = href.rstrip("/").split("/")[-1]
-                # Seller is the leading word(s) before the first recognised item-title word
-                # URL pattern: /{seller}-{title-words}-{4-char-hash}/
-                parts = slug.split("-")
-                seller = parts[0] if parts else ""
-                # Title: slug without seller prefix and 4-char hex suffix, dashes→spaces
-                title_parts = parts[1:-1] if len(parts) > 2 else parts
-                title = " ".join(title_parts).title()
-                # Price: strip £ symbol
-                raw_price = (card.get("price") or "").replace("£", "").replace(",", "").strip()
-
+                slug      = item.get("slug") or str(item.get("id", ""))
+                price_obj = item.get("price") or {}
+                price_raw = str(price_obj.get("priceAmount") or price_obj.get("amount") or "").strip()
+                seller    = (item.get("seller") or {}).get("username") or ""
+                previews  = item.get("preview") or item.get("pictures") or []
+                img_url   = previews[0].get("url", "") if previews else ""
+                title     = (item.get("description") or "").strip() or slug.replace("-", " ").title()
                 results.append({
                     "platform":     "depop",
                     "item_id":      slug,
                     "title":        title[:120],
-                    "price":        raw_price,
+                    "price":        price_raw,
                     "currency":     "GBP",
                     "condition":    "",
-                    "brand":        card.get("brand") or "",
-                    "size":         card.get("size") or "",
+                    "brand":        "",
+                    "size":         "",
                     "seller":       seller,
                     "location":     "",
-                    "image_url":    card.get("img") or "",
-                    "url":          href,
+                    "image_url":    img_url,
+                    "url":          f"https://www.depop.com/products/{slug}/",
                     "listed_at":    "",
                     "fetched_at":   datetime.now(timezone.utc).isoformat(),
                     "search_query": query,
@@ -1132,7 +1095,6 @@ class DepopScraper:
             self._browser.close()
         except Exception:
             pass
-
 
 # ── Mercari Japan (Playwright) ────────────────────────────────────────────────
 class MercariJPScraper:
