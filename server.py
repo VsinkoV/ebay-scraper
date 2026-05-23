@@ -574,15 +574,23 @@ _BETA_PAGE = """<!DOCTYPE html>
 
 @app.get("/auth/beta")
 async def auth_beta_get(request: Request):
-    email = _verify_pending(request.cookies.get("pending_email", ""))
-    if not email:
-        return RedirectResponse("/auth/login")
-    return HTMLResponse(_BETA_PAGE.format(email=email, error=""))
+    try:
+        email = _verify_pending(request.cookies.get("pending_email", ""))
+        if not email:
+            return RedirectResponse("/auth/login")
+        return HTMLResponse(_BETA_PAGE.format(email=email, error=""))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(f"<pre>ERROR: {type(e).__name__}: {e}\n\n{traceback.format_exc()}</pre>", status_code=500)
 
 
 @app.post("/auth/beta")
 async def auth_beta_post(request: Request):
-    email = _verify_pending(request.cookies.get("pending_email", ""))
+    try:
+     email = _verify_pending(request.cookies.get("pending_email", ""))
+    except Exception as e:
+        import traceback
+        return HTMLResponse(f"<pre>POST ERROR: {type(e).__name__}: {e}\n\n{traceback.format_exc()}</pre>", status_code=500)
     if not email:
         return RedirectResponse("/auth/login")
 
