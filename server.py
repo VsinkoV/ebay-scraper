@@ -140,8 +140,6 @@ def _valid_beta_code(code: str) -> bool:
     return bool(code) and code.upper() in codes and code.upper() not in _load_used_codes()
 
 CONFIG_DEFAULTS = {
-    "ebay_app_id":     "",
-    "ebay_cert_id":    "",
     "discord_webhook": "",
 }
 
@@ -312,8 +310,6 @@ class ProcessManager:
         excl_str = ",".join(s.get("exclude_keywords") or [])
         cfg = load_config()
         env = {**os.environ}
-        if cfg.get("ebay_app_id"):     env["UNIFI_EBAY_APP_ID"]     = cfg["ebay_app_id"]
-        if cfg.get("ebay_cert_id"):    env["UNIFI_EBAY_CERT_ID"]    = cfg["ebay_cert_id"]
         if cfg.get("discord_webhook"): env["UNIFI_DISCORD_WEBHOOK"] = cfg["discord_webhook"]
 
         cmd = [
@@ -473,8 +469,6 @@ class ThresholdIn(BaseModel):
 
 
 class SettingsIn(BaseModel):
-    ebay_app_id:     str = ""
-    ebay_cert_id:    str = ""
     discord_webhook: str = ""
 
 
@@ -749,8 +743,6 @@ def api_get_settings():
     cfg = load_config()
     # Mask secrets in response — send length instead of value
     return {
-        "ebay_app_id":        cfg["ebay_app_id"],
-        "ebay_cert_id_set":   bool(cfg["ebay_cert_id"]),
         "discord_webhook_set": bool(cfg["discord_webhook"]),
     }
 
@@ -758,10 +750,6 @@ def api_get_settings():
 @app.post("/api/settings")
 def api_save_settings(body: SettingsIn):
     cfg = load_config()
-    if body.ebay_app_id:
-        cfg["ebay_app_id"] = body.ebay_app_id
-    if body.ebay_cert_id:
-        cfg["ebay_cert_id"] = body.ebay_cert_id
     if body.discord_webhook:
         cfg["discord_webhook"] = body.discord_webhook
     save_config(cfg)

@@ -586,25 +586,6 @@
 <!-- ══════════════ SETTINGS ══════════════ -->
 <div class="page" id="page-settings">
   <div class="settings-wrap">
-    <div class="settings-section" style="--c:var(--ebay)">eBay Browse API</div>
-    <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Get free keys at developer.ebay.com → My Keys → Production</p>
-
-    <div class="settings-row">
-      <div class="settings-label">
-        <b>App ID (Client ID)</b>
-        <small>eBay developer App ID</small>
-      </div>
-      <input class="settings-input" id="s-app-id" placeholder="valeriys-scraping-PRD-…" autocomplete="off">
-    </div>
-
-    <div class="settings-row">
-      <div class="settings-label">
-        <b>Cert ID (Client Secret)</b>
-        <small>eBay developer Cert ID</small>
-      </div>
-      <input class="settings-input" id="s-cert-id" type="password" placeholder="●●●●●●●●" autocomplete="off">
-    </div>
-
     <div class="settings-section">Discord Notifications</div>
     <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Server Settings → Integrations → Webhooks → New Webhook → Copy URL</p>
 
@@ -1028,15 +1009,11 @@ function clearLog() {
 // ── Settings ──────────────────────────────────────────────────────────────────
 async function loadSettings() {
   const s = await api('GET', '/api/settings');
-  document.getElementById('s-app-id').value  = s.ebay_app_id || '';
-  if (s.ebay_cert_id_set)    document.getElementById('s-cert-id').placeholder  = '●●●●● (saved)';
-  if (s.discord_webhook_set) document.getElementById('s-webhook').placeholder  = '●●●●● (saved)';
+  if (s.discord_webhook_set) document.getElementById('s-webhook').placeholder = '●●●●● (saved)';
 }
 
 async function saveSettings() {
   const body = {
-    ebay_app_id:     document.getElementById('s-app-id').value.trim(),
-    ebay_cert_id:    document.getElementById('s-cert-id').value.trim(),
     discord_webhook: document.getElementById('s-webhook').value.trim(),
   };
   await api('POST', '/api/settings', body);
