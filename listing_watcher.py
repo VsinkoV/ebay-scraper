@@ -1014,70 +1014,48 @@ class VintedScraper:
 
 # ── Depop (Playwright DOM scraping) ──────────────────────────────────────────
 class DepopScraper:
-    WEB_BASE = "https://www.depop.com"
-    _STEALTH = (
-        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
-        "window.chrome={runtime:{}};"
-        "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
-    )
-    _NEXT_JS = r"""() => {
-        try {
-            const nd = window.__NEXT_DATA__;
-            if (!nd) return [];
-            const pp = nd.props?.pageProps || {};
-            return (pp.products || pp.searchResults?.products ||
-                    pp.initialData?.products || pp.data?.products || []);
-        } catch(e) { return []; }
-    }"""
+    API = "https://webapi.depop.com/api/v2/search/products/"
+    _HEADERS = {
+        "Accept":          "application/json",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Referer":         "https://www.depop.com/",
+        "Origin":          "https://www.depop.com",
+        "User-Agent":      UA,
+    }
 
     def __init__(self):
-        self._browser = _get_pw().chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--lang=en-GB"],
-        )
-        self._ctx  = self._browser.new_context(locale="en-GB", user_agent=UA, viewport={"width": 1280, "height": 800})
-        self._ctx.add_init_script(self._STEALTH)
-        self._page = self._ctx.new_page()
-        print(f"  {ICONS['depop']} Depop browser ready")
+        self._session = requests.Session()
+        self._session.headers.update(self._HEADERS)
+        print(f"  {ICONS['depop']} Depop ready (direct API)")
 
     def fetch(self, query: str) -> list[dict]:
-        api_items: list[dict] = []
-
-        def _on_response(resp):
-            try:
-                ct = resp.headers.get("content-type", "")
-                if "depop.com" in resp.url and "json" in ct and resp.status == 200:
-                    data = resp.json()
-                    products = (data.get("products") or data.get("items") or
-                                (data.get("data") or {}).get("products") or [])
-                    if isinstance(products, list) and products:
-                        api_items.extend(products)
-            except Exception:
-                pass
-
-        self._page.on("response", _on_response)
-        url = f"{self.WEB_BASE}/search/?q={requests.utils.quote(query)}&sort=NewestFirst"
+        params = {
+            "searchQuery": query,
+            "sort":        "NewestFirst",
+            "limit":       "50",
+            "offset":      "0",
+        }
         try:
-            self._page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            self._page.wait_for_timeout(5000)
+            resp = self._session.get(self.API, params=params, timeout=15)
         except Exception as e:
-            print(f"  ❌ Depop fetch error: {e}")
-        finally:
-            self._page.remove_listener("response", _on_response)
-
-        if not api_items:
-            try:
-                api_items = self._page.evaluate(self._NEXT_JS) or []
-            except Exception:
-                pass
-
-        if not api_items:
-            print(f"  ❌ Depop — no data found (Cloudflare may be blocking)")
+            print(f"  ❌ Depop request error: {e}")
             return []
 
-        print(f"  {ICONS['depop']} Depop — {len(api_items)} items")
+        if resp.status_code != 200:
+            print(f"  ❌ Depop API returned {resp.status_code}")
+            return []
+
+        try:
+            data = resp.json()
+        except Exception:
+            print(f"  ❌ Depop — invalid JSON response")
+            return []
+
+        products = data.get("products") or data.get("items") or []
+        print(f"  {ICONS['depop']} Depop — {len(products)} items via API")
+
         results = []
-        for item in api_items:
+        for item in products:
             try:
                 slug      = item.get("slug") or str(item.get("id", ""))
                 price_obj = item.get("price") or {}
@@ -1108,10 +1086,7 @@ class DepopScraper:
         return results
 
     def close(self):
-        try:
-            self._browser.close()
-        except Exception:
-            pass
+        self._session.close()
 
 # ── Mercari Japan (Playwright) ────────────────────────────────────────────────
 class MercariJPScraper:
