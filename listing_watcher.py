@@ -279,24 +279,28 @@ _SOLD_FIELDS = ["title", "price", "condition", "date_sold", "url"]
 
 def _parse_sold_page(page) -> list[dict]:
     rows = []
-    for item in page.query_selector_all("li.s-card[data-listingid]"):
-        title_el  = item.query_selector(".s-card__title span")
-        price_el  = item.query_selector(".s-card__price")
-        cond_el   = item.query_selector(".s-card__subtitle span")
-        date_el   = item.query_selector(".s-card__caption span")
-        link_el   = item.query_selector("a.s-card__link")
+    for item in page.query_selector_all("li.s-item"):
+        title_el = item.query_selector(".s-item__title")
+        price_el = item.query_selector(".s-item__price")
+        cond_el  = item.query_selector(".SECONDARY_INFO")
+        date_el  = item.query_selector(".s-item__caption--signal span, .POSITIVE")
+        link_el  = item.query_selector("a.s-item__link")
 
-        price_raw = (price_el.inner_text().strip() if price_el else "")
+        title = title_el.inner_text().strip() if title_el else ""
+        if not title or title.lower().startswith("shop on ebay"):
+            continue
+
+        price_raw = price_el.inner_text().strip() if price_el else ""
         if " to " in price_raw:
             price_raw = price_raw.split(" to ")[0]
         price_clean = price_raw.replace("£", "").replace(",", "").strip()
 
         rows.append({
-            "title":      (title_el.inner_text().strip() if title_el else ""),
-            "price":      price_clean,
-            "condition":  (cond_el.inner_text().strip()  if cond_el  else ""),
-            "date_sold":  (date_el.inner_text().strip()  if date_el  else ""),
-            "url":        (link_el.get_attribute("href") if link_el  else ""),
+            "title":     title,
+            "price":     price_clean,
+            "condition": cond_el.inner_text().strip() if cond_el else "",
+            "date_sold": date_el.inner_text().strip()  if date_el else "",
+            "url":       link_el.get_attribute("href") if link_el else "",
         })
     return rows
 
@@ -333,12 +337,8 @@ def scrape_ebay_sold(query: str, max_pages: int = 5, min_records: int = 0) -> fl
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_timeout(2000)
-            # Try primary selector, fall back to any s-card
             try:
-                page.wait_for_selector(
-                    "li.s-card[data-listingid], li[data-view='mi:1686|iid:1']",
-                    timeout=15_000,
-                )
+                page.wait_for_selector("li.s-item", timeout=15_000)
             except Exception:
                 pass  # Parse whatever is on the page
         except Exception as e:
@@ -347,15 +347,17 @@ def scrape_ebay_sold(query: str, max_pages: int = 5, min_records: int = 0) -> fl
 
         rows = _parse_sold_page(page)
         if not rows:
-            # Try JS-based extraction as fallback
+            # JS fallback using current eBay selectors
             raw = page.evaluate(r"""() => {
-                return Array.from(document.querySelectorAll('li.s-card[data-listingid], li[data-view]'))
+                return Array.from(document.querySelectorAll('li.s-item'))
                     .filter(el => el.querySelector('a[href*="ebay.co.uk/itm/"]'))
                     .map(el => {
-                        const t = el.querySelector('.s-card__title, h3, .lvtitle');
-                        const p = el.querySelector('.s-card__price, .s-item__price');
-                        return { title: t ? t.innerText.trim() : '', price: p ? p.innerText.trim() : '' };
-                    }).filter(r => r.title && r.price);
+                        const t = el.querySelector('.s-item__title');
+                        const p = el.querySelector('.s-item__price');
+                        const title = t ? t.innerText.trim() : '';
+                        if (!title || title.toLowerCase().startsWith('shop on ebay')) return null;
+                        return { title, price: p ? p.innerText.trim() : '' };
+                    }).filter(r => r && r.title && r.price);
             }""")
             if raw:
                 rows = [{"title": r["title"], "price": r["price"],
