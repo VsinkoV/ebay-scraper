@@ -25,9 +25,8 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
 # ── Google OAuth + session auth ───────────────────────────────────────────────
@@ -62,20 +61,42 @@ def _verify_pending(cookie: str) -> "str | None":
 
 OPEN_PATHS = {"/", "/auth/login", "/auth/callback", "/auth/beta", "/api/auth/verify"}
 
-class AuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        if not GOOGLE_CLIENT_ID:          # auth disabled in local dev
-            return await call_next(request)
-        path = request.url.path
+class AuthMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        if not GOOGLE_CLIENT_ID:
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
         if path in OPEN_PATHS or path.startswith("/ws"):
-            return await call_next(request)
-        session = request.cookies.get("session", "")
+            await self.app(scope, receive, send)
+            return
+        # Parse session cookie from headers
+        cookies = {}
+        for name, value in scope.get("headers", []):
+            if name == b"cookie":
+                for part in value.decode().split(";"):
+                    if "=" in part:
+                        k, v = part.strip().split("=", 1)
+                        cookies[k.strip()] = v.strip()
+        session = cookies.get("session", "")
         if not _verify_session(session):
-            if request.headers.get("accept", "").startswith("text/html"):
-                from fastapi.responses import RedirectResponse
-                return RedirectResponse("/auth/login")
-            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
-        return await call_next(request)
+            accept = ""
+            for name, value in scope.get("headers", []):
+                if name == b"accept":
+                    accept = value.decode()
+            if accept.startswith("text/html"):
+                response = RedirectResponse("/auth/login")
+            else:
+                response = JSONResponse({"detail": "Not authenticated"}, status_code=401)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 # ── Paths (same as gui.py) ────────────────────────────────────────────────────
 DATASETS_DIR        = Path("datasets")
@@ -467,8 +488,6 @@ class SettingsIn(BaseModel):
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
-from fastapi.responses import RedirectResponse
-
 @app.get("/auth/login")
 def auth_login():
     if not GOOGLE_CLIENT_ID:
