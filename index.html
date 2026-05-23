@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Unifi — Marketplace Watcher</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0b0f18;
+    --bg2:       #111827;
+    --bg3:       #1c2433;
+    --bg4:       #243044;
+    --border:    #1e2d42;
+    --border2:   #2e3f58;
+    --text:      #e2e8f0;
+    --muted:     #64748b;
+    --faint:     #334155;
+    --green:     #22c55e;
+    --green-dim: #14532d;
+    --red:       #ef4444;
+    --red-dim:   #450a0a;
+    --blue:      #3b82f6;
+    --yellow:    #f59e0b;
+    --purple:    #a78bfa;
+    --teal:      #2dd4bf;
+    --orange:    #f97316;
+    --ebay:      #e53238;
+    --vinted:    #09b1ba;
+    --depop:     #ff4040;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Nav ── */
+  nav {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    height: 52px;
+    flex-shrink: 0;
+    padding: 0 8px;
+    gap: 2px;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px 0 8px;
+    margin-right: 8px;
+    border-right: 1px solid var(--border);
+  }
+
+  .logo-icon {
+    width: 30px; height: 30px;
+    background: var(--blue);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 14px; color: white;
+  }
+
+  .logo-text { font-weight: 700; font-size: 15px; }
+  .logo-sub  { color: var(--muted); font-size: 11px; }
+
+  .tab-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 6px 14px;
+    border-radius: 6px;
+    position: relative;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+  .tab-btn:hover { background: var(--bg3); color: var(--text); }
+  .tab-btn.active { color: var(--blue); background: rgba(59,130,246,0.12); }
+  .tab-btn.active::after {
+    content: '';
+    position: absolute;
+    bottom: -1px; left: 8px; right: 8px;
+    height: 2px;
+    background: var(--blue);
+    border-radius: 2px 2px 0 0;
+  }
+  .tab-btn[data-tab="bargains"].active { color: var(--yellow); background: rgba(245,158,11,0.12); }
+  .tab-btn[data-tab="bargains"].active::after { background: var(--yellow); }
+  .tab-btn[data-tab="missed"].active   { color: var(--red);    background: rgba(239,68,68,0.12); }
+  .tab-btn[data-tab="missed"].active::after   { background: var(--red); }
+  .tab-btn[data-tab="log"].active      { color: var(--purple); background: rgba(167,139,250,0.12); }
+  .tab-btn[data-tab="log"].active::after      { background: var(--purple); }
+  .tab-btn[data-tab="settings"].active { color: var(--green);  background: rgba(34,197,94,0.12); }
+  .tab-btn[data-tab="settings"].active::after { background: var(--green); }
+
+  .badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--yellow); color: var(--bg);
+    font-size: 9px; font-weight: 700;
+    border-radius: 8px; padding: 1px 5px;
+    margin-left: 4px; vertical-align: middle;
+  }
+
+  .nav-status {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 12px;
+    padding: 0 12px;
+  }
+  .nav-status.running { color: var(--green); }
+
+  /* ── Pages ── */
+  .page { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+  .page.active { display: flex; }
+
+  /* ── Table header ── */
+  .col-header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    height: 36px;
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    gap: 0;
+  }
+
+  .col-header span { padding: 0 8px; }
+
+  /* ── Scrollable list ── */
+  .scroll-area {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  .scroll-area::-webkit-scrollbar { width: 5px; }
+  .scroll-area::-webkit-scrollbar-track { background: var(--bg2); }
+  .scroll-area::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+
+  /* ── Task row ── */
+  .task-row {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    padding: 0 16px;
+    height: 56px;
+    transition: background 0.1s;
+    position: relative;
+  }
+  .task-row:hover { background: var(--bg3); }
+  .task-row.running::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+    background: var(--green);
+  }
+
+  .row-num   { width: 32px;  color: var(--faint); font-size: 12px; }
+  .row-name  { width: 180px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
+  .row-query { width: 220px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; font-size: 13px; }
+  .row-plats { width: 110px; padding: 0 8px; display: flex; gap: 4px; }
+  .row-interval { width: 80px; padding: 0 8px; color: var(--muted); font-size: 12px; }
+  .row-status { width: 100px; padding: 0 8px; }
+  .row-actions { margin-left: auto; display: flex; gap: 6px; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 9px; border-radius: 12px;
+    font-size: 11px; font-weight: 700;
+  }
+  .pill::before { content: '●'; font-size: 8px; }
+  .pill.running { background: rgba(34,197,94,0.15); color: var(--green); }
+  .pill.idle    { background: rgba(51,65,85,0.4);   color: var(--faint); }
+
+  /* ── Buttons ── */
+  .btn {
+    border: none; cursor: pointer; border-radius: 6px;
+    font-size: 12px; font-weight: 600;
+    padding: 5px 12px; transition: opacity 0.15s, background 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn-green  { background: var(--green-dim);  color: var(--green); }
+  .btn-red    { background: var(--red-dim);    color: var(--red); }
+  .btn-ghost  { background: var(--bg3);        color: var(--muted); }
+  .btn-blue   { background: var(--blue);       color: white; }
+  .btn-primary { background: var(--green);     color: var(--bg); font-size: 13px; padding: 8px 20px; }
+  .btn-danger { background: var(--red);        color: white; }
+  .btn-icon   { padding: 5px 9px; font-size: 14px; }
+
+  /* ── Bottom bar ── */
+  .bottom-bar {
+    background: var(--bg2);
+    border-top: 1px solid var(--border);
+    height: 52px;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+
+  .stat { color: var(--muted); font-size: 12px; }
+  .stat.active { color: var(--green); }
+
+  /* ── Empty state ── */
+  .empty {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    color: var(--muted); gap: 8px; text-align: center;
+  }
+  .empty-title { font-size: 16px; font-weight: 600; }
+  .empty-sub   { font-size: 13px; color: var(--faint); }
+
+  /* ── Bargain / Missed rows ── */
+  .item-row {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    padding: 0 16px;
+    height: 52px;
+    transition: background 0.1s;
+    position: relative;
+    gap: 0;
+  }
+  .item-row:hover { background: var(--bg3); }
+  .item-row .accent {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  }
+
+  .col-time   { width: 56px;  color: var(--muted); font-size: 11px; padding: 0 8px; }
+  .col-plat   { width: 90px;  font-weight: 600; font-size: 12px; padding: 0 8px; }
+  .col-title  { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; font-size: 13px; }
+  .col-price  { width: 72px;  font-weight: 700; font-size: 13px; padding: 0 8px; text-align: right; }
+  .col-saves  { width: 72px;  font-size: 12px; padding: 0 8px; text-align: right; }
+  .col-link   { width: 72px;  padding: 0 8px; }
+
+  .link-btn {
+    color: var(--blue); background: none; border: none;
+    cursor: pointer; font-size: 12px; font-weight: 600;
+    text-decoration: none;
+    padding: 3px 0;
+  }
+  .link-btn:hover { text-decoration: underline; }
+
+  /* ── Toolbar ── */
+  .toolbar {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    height: 44px;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .sort-btn {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 12px; padding: 4px 10px;
+    border-radius: 5px; transition: background 0.15s, color 0.15s;
+  }
+  .sort-btn:hover { background: var(--bg3); color: var(--text); }
+  .sort-btn.active { color: var(--blue); }
+
+  /* ── Log ── */
+  #log-output {
+    flex: 1;
+    background: #060d18;
+    color: #8b9db5;
+    font-family: 'Menlo', 'Consolas', monospace;
+    font-size: 12px;
+    padding: 12px 16px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.6;
+  }
+
+  #log-output::-webkit-scrollbar { width: 5px; }
+  #log-output::-webkit-scrollbar-track { background: #060d18; }
+  #log-output::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+
+  .log-ts      { color: #2d4a6a; }
+  .log-name    { color: var(--purple); }
+  .log-bargain { color: var(--yellow); }
+  .log-new     { color: var(--green); }
+  .log-error   { color: var(--red); }
+  .log-info    { color: var(--blue); }
+
+  /* ── Settings ── */
+  .settings-wrap { padding: 32px; max-width: 700px; overflow-y: auto; flex: 1; }
+
+  .settings-section {
+    display: flex; align-items: center; gap: 10px;
+    margin: 28px 0 12px;
+    font-size: 13px; font-weight: 700;
+  }
+  .settings-section::before {
+    content: '';
+    display: block; width: 3px; height: 18px;
+    background: var(--green); border-radius: 2px;
+  }
+
+  .settings-row {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex; align-items: center;
+    padding: 0 16px;
+    margin-bottom: 8px;
+    height: 64px;
+    gap: 16px;
+  }
+
+  .settings-label { width: 200px; flex-shrink: 0; }
+  .settings-label b { display: block; font-size: 13px; }
+  .settings-label small { color: var(--muted); font-size: 11px; }
+
+  .settings-input {
+    flex: 1;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 8px 12px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .settings-input:focus { border-color: var(--green); }
+  .settings-input::placeholder { color: var(--faint); }
+
+  .save-msg { font-size: 12px; color: var(--green); margin-left: 12px; }
+
+  /* ── Modal ── */
+  .modal-backdrop {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center; justify-content: center;
+  }
+  .modal-backdrop.open { display: flex; }
+
+  .modal {
+    background: var(--bg);
+    border: 1px solid var(--border2);
+    border-radius: 12px;
+    width: 500px;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+  }
+
+  .modal-header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 18px 24px;
+    display: flex; align-items: center; gap: 10px;
+    border-radius: 12px 12px 0 0;
+  }
+
+  .modal-header .logo-icon { flex-shrink: 0; }
+  .modal-header h2 { font-size: 15px; font-weight: 700; }
+
+  .modal-body { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+
+  .field label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+  .field small  { display: block; color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+
+  .field input, .field textarea {
+    width: 100%;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 10px 12px;
+    outline: none;
+    transition: border-color 0.15s;
+    font-family: inherit;
+  }
+  .field input:focus, .field textarea:focus { border-color: var(--blue); }
+  .field input.error { border-color: var(--red); }
+
+  .platform-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+  .plat-toggle {
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    padding: 10px 16px;
+    cursor: pointer;
+    font-size: 12px; font-weight: 600;
+    background: var(--bg2);
+    color: var(--muted);
+    transition: all 0.15s;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .plat-toggle.selected-ebay   { border-color: var(--ebay);   color: var(--ebay);   background: rgba(229,50,56,0.12); }
+  .plat-toggle.selected-vinted { border-color: var(--vinted); color: var(--vinted); background: rgba(9,177,186,0.12); }
+  .plat-toggle.selected-depop  { border-color: var(--depop);  color: var(--depop);  background: rgba(255,64,64,0.12); }
+
+  .interval-row { display: flex; align-items: center; gap: 8px; }
+  .interval-val {
+    background: var(--bg3); border-radius: 6px;
+    padding: 8px 16px; font-size: 16px; font-weight: 700;
+    min-width: 56px; text-align: center;
+  }
+  .btn-stepper {
+    background: var(--bg3); border: none; color: var(--text);
+    border-radius: 6px; width: 36px; height: 36px;
+    font-size: 18px; cursor: pointer; display: flex;
+    align-items: center; justify-content: center;
+    transition: background 0.15s;
+  }
+  .btn-stepper:hover { background: var(--bg4); }
+
+  .modal-footer {
+    border-top: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex; gap: 10px;
+  }
+
+  /* ── Platform colours ── */
+  .ebay   { color: var(--ebay); }
+  .vinted { color: var(--vinted); }
+  .depop  { color: var(--depop); }
+
+  /* ── Divider ── */
+  hr { border: none; border-top: 1px solid var(--border); }
+
+  /* ── Countdown ── */
+  .countdown { color: var(--teal); font-size: 11px; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<!-- ── Nav ─────────────────────────────────────────────────────────────── -->
+<nav>
+  <div class="logo">
+    <div class="logo-icon">U</div>
+    <div>
+      <div class="logo-text">Unifi</div>
+      <div class="logo-sub">marketplace</div>
+    </div>
+  </div>
+
+  <button class="tab-btn active" data-tab="tasks">Tasks</button>
+  <button class="tab-btn" data-tab="bargains">Bargains <span class="badge" id="badge-bargains" style="display:none"></span></button>
+  <button class="tab-btn" data-tab="missed">Missed <span class="badge" id="badge-missed" style="display:none;background:var(--red);color:white"></span></button>
+  <button class="tab-btn" data-tab="log">Log</button>
+  <button class="tab-btn" data-tab="settings">Settings</button>
+
+  <div class="nav-status" id="nav-status">● Idle</div>
+</nav>
+
+<!-- ══════════════ TASKS ══════════════ -->
+<div class="page active" id="page-tasks">
+  <div class="col-header">
+    <span style="width:32px">#</span>
+    <span style="width:180px;padding:0 8px">Name</span>
+    <span style="width:220px;padding:0 8px">Query</span>
+    <span style="width:110px;padding:0 8px">Platforms</span>
+    <span style="width:80px;padding:0 8px">Interval</span>
+    <span style="width:100px;padding:0 8px">Status</span>
+    <span style="margin-left:auto;padding:0 8px">Actions</span>
+  </div>
+  <div class="scroll-area" id="tasks-list"></div>
+  <div class="bottom-bar">
+    <button class="btn btn-danger" onclick="openModal()">+ Create</button>
+    <div style="width:1px;height:24px;background:var(--border)"></div>
+    <span class="stat" id="stat-running">0 Running</span>
+    <span class="stat" id="stat-bargains">0 Bargains</span>
+    <span class="stat" id="stat-tasks">0 Tasks</span>
+    <div style="margin-left:auto;display:flex;gap:8px">
+      <button class="btn btn-ghost" onclick="stopAll()">■ Stop All</button>
+      <button class="btn btn-green" onclick="startAll()">▶ Start All</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ BARGAINS ══════════════ -->
+<div class="page" id="page-bargains">
+  <div class="toolbar">
+    <span style="color:var(--muted);font-size:12px">Sort:</span>
+    <button class="sort-btn active" data-sort="newest" onclick="setSortBargains('newest',this)">Newest</button>
+    <button class="sort-btn" data-sort="price_asc" onclick="setSortBargains('price_asc',this)">Price ↑</button>
+    <button class="sort-btn" data-sort="price_desc" onclick="setSortBargains('price_desc',this)">Price ↓</button>
+    <div style="margin-left:auto;display:flex;gap:8px">
+      <button class="btn btn-ghost" onclick="clearBargains()">Clear</button>
+    </div>
+  </div>
+  <div class="col-header">
+    <span style="width:56px;padding:0 8px">Time</span>
+    <span style="width:90px;padding:0 8px">Platform</span>
+    <span style="flex:1;padding:0 8px">Title</span>
+    <span style="width:72px;padding:0 8px;text-align:right">Price</span>
+    <span style="width:72px;padding:0 8px;text-align:right">Saves</span>
+    <span style="width:72px;padding:0 8px">Link</span>
+  </div>
+  <div class="scroll-area" id="bargains-list"></div>
+</div>
+
+<!-- ══════════════ MISSED ══════════════ -->
+<div class="page" id="page-missed">
+  <div class="toolbar">
+    <span style="color:var(--muted);font-size:12px;font-weight:600">Missed Deals</span>
+    <span style="color:var(--muted);font-size:12px">· Items that sold before you could buy them</span>
+    <div style="margin-left:auto">
+      <button class="btn btn-ghost" onclick="clearMissed()">Clear All</button>
+    </div>
+  </div>
+  <div class="col-header">
+    <span style="width:56px;padding:0 8px">Sold</span>
+    <span style="width:90px;padding:0 8px">Platform</span>
+    <span style="flex:1;padding:0 8px">Title</span>
+    <span style="width:72px;padding:0 8px;text-align:right">Price</span>
+    <span style="width:72px;padding:0 8px;text-align:right">Saves</span>
+    <span style="width:72px;padding:0 8px">Link</span>
+  </div>
+  <div class="scroll-area" id="missed-list"></div>
+</div>
+
+<!-- ══════════════ LOG ══════════════ -->
+<div class="page" id="page-log">
+  <div class="toolbar">
+    <span style="color:var(--muted);font-size:12px">Live Output</span>
+    <div style="margin-left:auto">
+      <button class="btn btn-ghost" onclick="clearLog()">Clear</button>
+    </div>
+  </div>
+  <div id="log-output"></div>
+</div>
+
+<!-- ══════════════ SETTINGS ══════════════ -->
+<div class="page" id="page-settings">
+  <div class="settings-wrap">
+    <div class="settings-section" style="--c:var(--ebay)">eBay Browse API</div>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Get free keys at developer.ebay.com → My Keys → Production</p>
+
+    <div class="settings-row">
+      <div class="settings-label">
+        <b>App ID (Client ID)</b>
+        <small>eBay developer App ID</small>
+      </div>
+      <input class="settings-input" id="s-app-id" placeholder="valeriys-scraping-PRD-…" autocomplete="off">
+    </div>
+
+    <div class="settings-row">
+      <div class="settings-label">
+        <b>Cert ID (Client Secret)</b>
+        <small>eBay developer Cert ID</small>
+      </div>
+      <input class="settings-input" id="s-cert-id" type="password" placeholder="●●●●●●●●" autocomplete="off">
+    </div>
+
+    <div class="settings-section">Discord Notifications</div>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Server Settings → Integrations → Webhooks → New Webhook → Copy URL</p>
+
+    <div class="settings-row">
+      <div class="settings-label">
+        <b>Webhook URL</b>
+        <small>Discord channel webhook</small>
+      </div>
+      <input class="settings-input" id="s-webhook" type="password" placeholder="https://discord.com/api/webhooks/…" autocomplete="off">
+    </div>
+
+    <hr style="margin:24px 0">
+    <div style="display:flex;align-items:center;gap:12px">
+      <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+      <span class="save-msg" id="settings-msg"></span>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ MODAL ══════════════ -->
+<div class="modal-backdrop" id="modal-backdrop" onclick="closeModalOutside(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="logo-icon">U</div>
+      <h2 id="modal-title">New Search</h2>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Watch Name</label>
+        <small>Give this search a short label</small>
+        <input id="f-name" placeholder="e.g. All Saints Jacket">
+      </div>
+      <div class="field">
+        <label>Search Query</label>
+        <small>What to search for across platforms</small>
+        <input id="f-query" placeholder="e.g. all saints leather jacket">
+      </div>
+      <div class="field">
+        <label>Platforms</label>
+        <small>Click to select — at least one required</small>
+        <div class="platform-row">
+          <div class="plat-toggle selected-ebay" data-plat="ebay" onclick="togglePlat(this)">🛒 eBay</div>
+          <div class="plat-toggle selected-vinted" data-plat="vinted" onclick="togglePlat(this)">👗 Vinted</div>
+          <div class="plat-toggle selected-depop" data-plat="depop" onclick="togglePlat(this)">📦 Depop</div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Exclude Keywords</label>
+        <small>Comma-separated words to block e.g. broken, damaged</small>
+        <input id="f-exclude" placeholder="broken, damaged, spares">
+      </div>
+      <div class="field">
+        <label>Poll Interval</label>
+        <small>How often to check for new listings (minutes)</small>
+        <div class="interval-row">
+          <button class="btn-stepper" onclick="changeInterval(-1)">−</button>
+          <div class="interval-val" id="interval-display">5</div>
+          <span style="color:var(--muted);font-size:12px">min</span>
+          <button class="btn-stepper" onclick="changeInterval(1)">+</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="saveSearch()">+ Save Watch</button>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+let searches   = [];
+let bargains   = [];
+let missed     = [];
+let sortMode   = 'newest';
+let editingName = null;
+let intervalVal = 5;
+let ws = null;
+
+const PLAT_ICON  = { ebay: '🛒', vinted: '👗', depop: '📦' };
+const PLAT_COLOR = { ebay: 'var(--ebay)', vinted: 'var(--vinted)', depop: 'var(--depop)' };
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('page-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => appendLog('System', 'Connected to server', 'info');
+
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'init') {
+      bargains = msg.bargains || [];
+      missed   = msg.missed   || [];
+      renderBargains();
+      renderMissed();
+    }
+    if (msg.type === 'log')     { appendLog(msg.name, msg.line); }
+    if (msg.type === 'bargain') { bargains.unshift(msg.item); renderBargains(); updateStats(); flashTab('bargains'); }
+    if (msg.type === 'status')  { loadSearches(); }
+  };
+
+  ws.onclose = () => {
+    appendLog('System', 'Disconnected — reconnecting in 3s…', 'error');
+    setTimeout(connectWS, 3000);
+  };
+
+  setInterval(() => ws && ws.readyState === 1 && ws.send('ping'), 25000);
+}
+
+// ── API helpers ───────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  if (!r.ok) { const t = await r.text(); throw new Error(t); }
+  return r.json().catch(() => ({}));
+}
+
+// ── Searches / Tasks ──────────────────────────────────────────────────────────
+async function loadSearches() {
+  searches = await api('GET', '/api/searches');
+  renderTasks();
+  updateStats();
+}
+
+function renderTasks() {
+  const el = document.getElementById('tasks-list');
+  if (!searches.length) {
+    el.innerHTML = `<div class="empty">
+      <div class="empty-title">No saved searches yet</div>
+      <div class="empty-sub">Click + Create below to add one</div>
+    </div>`;
+    return;
+  }
+  el.innerHTML = searches.map((s, i) => `
+    <div class="task-row ${s.running ? 'running' : ''}" id="row-${s.name.replace(/\W/g,'_')}">
+      <div class="row-num">${i + 1}</div>
+      <div class="row-name">${esc(s.name)}</div>
+      <div class="row-query">${esc(s.query)}</div>
+      <div class="row-plats">
+        ${(s.platforms || []).map(p =>
+          `<span style="color:${PLAT_COLOR[p]}" title="${p}">${PLAT_ICON[p]||'?'}</span>`
+        ).join('')}
+      </div>
+      <div class="row-interval">
+        ${s.interval_min}m
+        ${s.running ? `<span class="countdown" id="cd-${s.name.replace(/\W/g,'_')}"></span>` : ''}
+      </div>
+      <div class="row-status">
+        <span class="pill ${s.running ? 'running' : 'idle'}">${s.running ? 'RUNNING' : 'IDLE'}</span>
+      </div>
+      <div class="row-actions">
+        ${s.running
+          ? `<button class="btn btn-red btn-icon" title="Stop" onclick="stopSearch('${esc(s.name)}')">■</button>`
+          : `<button class="btn btn-green btn-icon" title="Start" onclick="startSearch('${esc(s.name)}')">▶</button>`
+        }
+        <button class="btn btn-ghost btn-icon" title="Edit" onclick='editSearch(${JSON.stringify(s)})'>✎</button>
+        <button class="btn btn-ghost btn-icon" title="Delete" style="color:var(--red)" onclick="deleteSearch('${esc(s.name)}')">🗑</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function startSearch(name) {
+  await api('POST', `/api/searches/${encodeURIComponent(name)}/start`);
+  loadSearches();
+}
+
+async function stopSearch(name) {
+  await api('POST', `/api/searches/${encodeURIComponent(name)}/stop`);
+  loadSearches();
+}
+
+async function deleteSearch(name) {
+  if (!confirm(`Delete "${name}"?`)) return;
+  await api('DELETE', `/api/searches/${encodeURIComponent(name)}`);
+  loadSearches();
+}
+
+async function startAll() {
+  await api('POST', '/api/start-all');
+  loadSearches();
+}
+
+async function stopAll() {
+  await api('POST', '/api/stop-all');
+  loadSearches();
+}
+
+function updateStats() {
+  const running = searches.filter(s => s.running).length;
+  document.getElementById('stat-running').textContent  = `${running} Running`;
+  document.getElementById('stat-running').className    = `stat ${running ? 'active' : ''}`;
+  document.getElementById('stat-bargains').textContent = `${bargains.length} Bargains`;
+  document.getElementById('stat-tasks').textContent    = `${searches.length} Tasks`;
+  const ns = document.getElementById('nav-status');
+  ns.textContent = running ? '● Watching' : '● Idle';
+  ns.className   = `nav-status ${running ? 'running' : ''}`;
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+function openModal(existing) {
+  editingName = existing ? existing.name : null;
+  document.getElementById('modal-title').textContent = existing ? 'Edit Search' : 'New Search';
+  document.getElementById('f-name').value    = existing?.name  || '';
+  document.getElementById('f-query').value   = existing?.query || '';
+  document.getElementById('f-exclude').value = (existing?.exclude_keywords || []).join(', ');
+  intervalVal = existing?.interval_min || 5;
+  document.getElementById('interval-display').textContent = intervalVal;
+
+  const active = new Set(existing?.platforms || ['ebay', 'vinted', 'depop']);
+  document.querySelectorAll('.plat-toggle').forEach(t => {
+    const p = t.dataset.plat;
+    t.className = `plat-toggle${active.has(p) ? ` selected-${p}` : ''}`;
+  });
+
+  document.getElementById('modal-backdrop').classList.add('open');
+  document.getElementById('f-name').focus();
+}
+
+function editSearch(s) { openModal(s); }
+
+function closeModal() {
+  document.getElementById('modal-backdrop').classList.remove('open');
+}
+
+function closeModalOutside(e) {
+  if (e.target === document.getElementById('modal-backdrop')) closeModal();
+}
+
+function togglePlat(el) {
+  const p = el.dataset.plat;
+  el.className = el.className.includes(`selected-${p}`)
+    ? 'plat-toggle'
+    : `plat-toggle selected-${p}`;
+}
+
+function changeInterval(delta) {
+  intervalVal = Math.max(1, Math.min(120, intervalVal + delta));
+  document.getElementById('interval-display').textContent = intervalVal;
+}
+
+async function saveSearch() {
+  const name  = document.getElementById('f-name').value.trim();
+  const query = document.getElementById('f-query').value.trim();
+  const plats = [...document.querySelectorAll('.plat-toggle')]
+    .filter(t => /selected-/.test(t.className))
+    .map(t => t.dataset.plat);
+  const excl  = document.getElementById('f-exclude').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+  const nameEl = document.getElementById('f-name');
+  if (!name)  { nameEl.classList.add('error');  nameEl.focus(); return; }
+  if (!query) { document.getElementById('f-query').classList.add('error'); return; }
+  if (!plats.length) { alert('Select at least one platform'); return; }
+
+  const body = { name, query, platforms: plats, interval_min: intervalVal, exclude_keywords: excl };
+  const endpoint = editingName
+    ? `/api/searches/${encodeURIComponent(editingName)}`
+    : '/api/searches';
+  const method = editingName ? 'PUT' : 'POST';
+
+  await api(method, endpoint, body);
+  closeModal();
+  loadSearches();
+}
+
+document.getElementById('f-name').addEventListener('input',  e => e.target.classList.remove('error'));
+document.getElementById('f-query').addEventListener('input', e => e.target.classList.remove('error'));
+
+// ── Bargains ──────────────────────────────────────────────────────────────────
+let bargainSort = 'newest';
+
+function setSortBargains(mode, btn) {
+  bargainSort = mode;
+  document.querySelectorAll('.sort-btn').forEach(b => b.classList.toggle('active', b === btn));
+  renderBargains();
+}
+
+function sortedBargains() {
+  if (bargainSort === 'price_asc')  return [...bargains].sort((a, b) => parsePrice(a.price) - parsePrice(b.price));
+  if (bargainSort === 'price_desc') return [...bargains].sort((a, b) => parsePrice(b.price) - parsePrice(a.price));
+  return [...bargains];
+}
+
+function renderBargains() {
+  const el = document.getElementById('bargains-list');
+  const items = sortedBargains();
+  if (!items.length) {
+    el.innerHTML = `<div class="empty">
+      <div class="empty-title">No bargains yet</div>
+      <div class="empty-sub">Start a watch in Tasks to begin finding bargains</div>
+    </div>`;
+    updateBadge('bargains', 0);
+    return;
+  }
+  el.innerHTML = items.map(b => itemRow(b, 'var(--yellow)', false)).join('');
+  updateBadge('bargains', items.length);
+}
+
+async function clearBargains() {
+  if (!confirm('Clear all bargains?')) return;
+  await api('DELETE', '/api/bargains');
+  bargains = [];
+  renderBargains();
+  updateStats();
+}
+
+// ── Missed ────────────────────────────────────────────────────────────────────
+function renderMissed() {
+  const el = document.getElementById('missed-list');
+  if (!missed.length) {
+    el.innerHTML = `<div class="empty">
+      <div class="empty-title">Nothing missed yet</div>
+      <div class="empty-sub">Sold bargains will appear here</div>
+    </div>`;
+    updateBadge('missed', 0);
+    return;
+  }
+  el.innerHTML = missed.slice().reverse().map(m => itemRow(m, 'var(--red)', true)).join('');
+  updateBadge('missed', missed.length);
+}
+
+async function clearMissed() {
+  if (!confirm('Clear all missed deals?')) return;
+  await api('DELETE', '/api/missed');
+  missed = [];
+  renderMissed();
+}
+
+function itemRow(item, accentColor, isMissed) {
+  const p     = item.platform || '';
+  const price = item.price ? `£${item.price}` : '?';
+  const saves = item.savings ? `-£${parseFloat(item.savings).toFixed(0)}` : '';
+  const time  = item.sold_at || item.time || '';
+  return `
+    <div class="item-row">
+      <div class="accent" style="background:${accentColor}"></div>
+      <div class="col-time">${esc(time)}</div>
+      <div class="col-plat" style="color:${PLAT_COLOR[p]||'var(--muted)'}">
+        ${PLAT_ICON[p]||'?'} ${p.charAt(0).toUpperCase()+p.slice(1)}
+      </div>
+      <div class="col-title">${esc(item.title||'')}</div>
+      <div class="col-price" style="color:${isMissed?'var(--red)':'var(--green)'}">${esc(price)}</div>
+      <div class="col-saves" style="color:${isMissed?'var(--muted)':'var(--yellow)'}">${esc(saves)}</div>
+      <div class="col-link">
+        ${item.url ? `<a class="link-btn" href="${esc(item.url)}" target="_blank" rel="noopener">View →</a>` : ''}
+      </div>
+    </div>`;
+}
+
+// ── Log ───────────────────────────────────────────────────────────────────────
+function appendLog(name, line, forceTag) {
+  const el  = document.getElementById('log-output');
+  const ts  = new Date().toTimeString().slice(0,8);
+  const l   = (line||'').toLowerCase();
+  const tag = forceTag ||
+    (l.includes('bargain') || line.includes('🔥') ? 'bargain' :
+     l.includes('✅') || l.includes('new') || l.includes('seeded') ? 'new' :
+     l.includes('❌') || l.includes('error') || l.includes('fail') ? 'error' :
+     l.includes('ready') || l.includes('[watch]') ? 'info' : '');
+
+  const span = document.createElement('span');
+  span.innerHTML =
+    `<span class="log-ts">[${ts}] </span>` +
+    `<span class="log-name">[${esc(name||'')}] </span>` +
+    `<span class="${tag ? 'log-'+tag : ''}">${esc(line||'')}\n</span>`;
+  el.appendChild(span);
+
+  // Cap at 2000 lines
+  while (el.children.length > 2000) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log-output').innerHTML = '';
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function loadSettings() {
+  const s = await api('GET', '/api/settings');
+  document.getElementById('s-app-id').value  = s.ebay_app_id || '';
+  if (s.ebay_cert_id_set)    document.getElementById('s-cert-id').placeholder  = '●●●●● (saved)';
+  if (s.discord_webhook_set) document.getElementById('s-webhook').placeholder  = '●●●●● (saved)';
+}
+
+async function saveSettings() {
+  const body = {
+    ebay_app_id:     document.getElementById('s-app-id').value.trim(),
+    ebay_cert_id:    document.getElementById('s-cert-id').value.trim(),
+    discord_webhook: document.getElementById('s-webhook').value.trim(),
+  };
+  await api('POST', '/api/settings', body);
+  const msg = document.getElementById('settings-msg');
+  msg.textContent = '✓ Saved';
+  setTimeout(() => msg.textContent = '', 3000);
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+function parsePrice(v) {
+  return parseFloat(String(v||'').replace(/[£,]/g,'')) || Infinity;
+}
+
+function updateBadge(tab, count) {
+  const el = document.getElementById(`badge-${tab}`);
+  if (!el) return;
+  el.style.display = count > 0 ? '' : 'none';
+  el.textContent   = count;
+}
+
+function flashTab(tab) {
+  const btn = document.querySelector(`.tab-btn[data-tab="${tab}"]`);
+  if (!btn) return;
+  btn.style.transition = 'none';
+  const orig = btn.style.color;
+  btn.style.color = 'var(--yellow)';
+  setTimeout(() => { btn.style.transition = ''; btn.style.color = orig; }, 2000);
+}
+
+// ── Countdown timers ──────────────────────────────────────────────────────────
+async function tickCountdowns() {
+  const status = await api('GET', '/api/status').catch(() => ({ running: [] }));
+  for (const r of (status.running || [])) {
+    const id = 'cd-' + r.name.replace(/\W/g,'_');
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const m = Math.floor(r.countdown_s / 60);
+    const s = r.countdown_s % 60;
+    el.textContent = ` ${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+connectWS();
+loadSearches();
+loadSettings();
+setInterval(tickCountdowns, 1000);
+</script>
+</body>
+</html>
