@@ -11,7 +11,6 @@ Requirements:
   pip3 install requests
 """
 
-import base64
 import csv
 import json
 import os
@@ -52,13 +51,7 @@ def _stop_pw() -> None:
         _PW = None
 
 # ── Shared config (mirrors tracker.py) ───────────────────────────────────────
-DISCORD_WEBHOOK = os.environ.get(
-    "UNIFI_DISCORD_WEBHOOK",
-    "https://discord.com/api/webhooks/1478702130100572210/14dADxhvzSmn4_bOxnNAOQG21bkqLDYUjice8aAImOifeZU7E7XArjL_hd_cSBjAlXkj",
-)
-
-EBAY_APP_ID  = os.environ.get("UNIFI_EBAY_APP_ID",  "valeriys-scraping-PRD-69545edfa-2d76aa13")
-EBAY_CERT_ID = os.environ.get("UNIFI_EBAY_CERT_ID", "PRD-9545edfac2c8-d5c3-4a2a-a757-7788")
+DISCORD_WEBHOOK = os.environ.get("UNIFI_DISCORD_WEBHOOK", "")
 
 DATASETS_DIR        = Path("datasets")
 DATASETS_DIR.mkdir(exist_ok=True)
@@ -66,8 +59,6 @@ SAVED_SEARCHES_FILE = DATASETS_DIR / "saved_searches.json"
 THRESHOLDS_FILE     = DATASETS_DIR / "thresholds.json"
 
 POLL_INTERVAL  = 300      # seconds between full poll cycles
-EBAY_MAX       = 200      # results per eBay call (API hard max)
-EBAY_PAGES     = 2        # how many pages to fetch (total up to EBAY_MAX * EBAY_PAGES)
 VINTED_MAX     = 96
 DEPOP_MAX      = 48
 
@@ -657,98 +648,98 @@ def send_discord(item: dict, query: str, threshold: float | None = None) -> None
         print(f"     ⚠️  Discord error: {e}")
 
 
-# ── eBay (Browse API) ─────────────────────────────────────────────────────────
+# ── eBay UK (Playwright) ──────────────────────────────────────────────────────
 class EbayScraper:
-    TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token"
-    SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
+    BASE   = "https://www.ebay.co.uk"
+    SEARCH = BASE + "/sch/i.html"
+    _STEALTH = (
+        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+        "window.chrome={runtime:{}};"
+        "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
+    )
+    _JS = r"""() => {
+        const clean = s => s
+            .replace(/^NEW LISTING\s*/i, '')
+            .replace(/\s*\nOpens in a new window or tab$/i, '')
+            .trim();
+        return Array.from(document.querySelectorAll('li.s-card[data-listingid]'))
+            .filter(el => el.querySelector("a[href*='ebay.co.uk/itm/']"))
+            .map(el => {
+                const link  = el.querySelector("a[href*='ebay.co.uk/itm/']");
+                const title = el.querySelector('.s-card__title');
+                const price = el.querySelector('.s-card__price');
+                const img   = el.querySelector('img.s-card__image');
+                const cond  = el.querySelector('.s-card__subtitle');
+                return {
+                    id:    el.getAttribute('data-listingid'),
+                    title: title ? clean(title.innerText) : '',
+                    price: price ? price.innerText.replace(/\s+/g,' ').trim() : '',
+                    href:  link  ? link.href.split('?')[0] : '',
+                    img:   img   ? img.src  : '',
+                    cond:  cond  ? cond.innerText.split('·')[0].trim() : '',
+                };
+            });
+    }"""
 
     def __init__(self):
-        self._token = None
-        self._token_exp = 0
-        self.session = requests.Session()
-
-    def _get_token(self) -> str:
-        if self._token and time.time() < self._token_exp - 60:
-            return self._token
-        creds = base64.b64encode(
-            f"{EBAY_APP_ID}:{EBAY_CERT_ID}".encode()
-        ).decode()
-        r = self.session.post(
-            self.TOKEN_URL,
-            headers={"Authorization": f"Basic {creds}",
-                     "Content-Type": "application/x-www-form-urlencoded"},
-            data={"grant_type": "client_credentials",
-                  "scope": "https://api.ebay.com/oauth/api_scope"},
-            timeout=15,
+        self._browser = _get_pw().chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--lang=en-GB"],
         )
-        r.raise_for_status()
-        d = r.json()
-        self._token     = d["access_token"]
-        self._token_exp = time.time() + int(d.get("expires_in", 7200))
-        return self._token
+        self._ctx = self._browser.new_context(
+            user_agent=UA, locale="en-GB",
+            viewport={"width": 1280, "height": 800},
+        )
+        self._ctx.add_init_script(self._STEALTH)
+        self._page = self._ctx.new_page()
+        try:
+            self._page.goto(self.BASE, wait_until="domcontentloaded", timeout=15_000)
+        except Exception:
+            pass
+        print(f"  {ICONS['ebay']} eBay browser ready")
 
     def fetch(self, query: str) -> list[dict]:
+        url = f"{self.SEARCH}?_nkw={requests.utils.quote(query)}&_sop=10&LH_PrefLoc=1"
         try:
-            token = self._get_token()
+            self._page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            self._page.wait_for_selector("li.s-card[data-listingid]", timeout=10_000)
+            self._page.wait_for_timeout(800)
+            cards = self._page.evaluate(self._JS)
         except Exception as e:
-            print(f"  ❌ eBay token error: {e}")
+            print(f"  ❌ eBay error: {e}")
             return []
 
-        headers = {
-            "Authorization":           f"Bearer {token}",
-            "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB",
-        }
-        items = []
-        for page in range(EBAY_PAGES):
-            params = {
-                "q":      query,
-                "limit":  EBAY_MAX,
-                "offset": page * EBAY_MAX,
-                "sort":   "newlyListed",
-                "filter": "itemLocationCountry:GB",
-            }
-            try:
-                r = self.session.get(self.SEARCH_URL, headers=headers,
-                                     params=params, timeout=15)
-                if r.status_code == 429:
-                    print("  ⚠️  eBay rate limited — stopping pagination")
-                    break
-                r.raise_for_status()
-                page_items = r.json().get("itemSummaries", [])
-                items.extend(page_items)
-                if len(page_items) < EBAY_MAX:
-                    break  # fewer results than requested — no more pages
-            except Exception as e:
-                print(f"  ❌ eBay fetch error (page {page}): {e}")
-                break
-
         results = []
-        for it in items:
+        for c in cards:
             try:
-                price_d  = it.get("price", {})
-                location = it.get("itemLocation", {})
-                loc_str  = ", ".join(filter(None, [
-                    location.get("city", ""), location.get("country", "")
-                ]))
+                raw   = c.get("price", "")
+                price = raw.split(" to ")[0].replace("£", "").replace(",", "").strip()
                 results.append({
                     "platform":     "ebay",
-                    "item_id":      it.get("itemId", ""),
-                    "title":        it.get("title", "").strip(),
-                    "price":        price_d.get("value", ""),
-                    "currency":     price_d.get("currency", "GBP"),
-                    "condition":    it.get("condition", ""),
+                    "item_id":      c["id"],
+                    "title":        c.get("title") or "",
+                    "price":        price,
+                    "currency":     "GBP",
+                    "condition":    c.get("cond") or "",
                     "brand":        "",
                     "size":         "",
-                    "seller":       it.get("seller", {}).get("username", ""),
-                    "location":     loc_str,
-                    "url":          it.get("itemWebUrl", ""),
-                    "listed_at":    it.get("listingStartedAt", ""),
+                    "seller":       "",
+                    "location":     "UK",
+                    "image_url":    c.get("img") or "",
+                    "url":          c.get("href") or "",
+                    "listed_at":    "",
                     "fetched_at":   datetime.now(timezone.utc).isoformat(),
                     "search_query": query,
                 })
             except Exception:
                 continue
         return results
+
+    def close(self):
+        try:
+            self._browser.close()
+        except Exception:
+            pass
 
 
 # ── Vinted (Playwright) ───────────────────────────────────────────────────────
@@ -1322,7 +1313,7 @@ def _run_watch_cli() -> None:
     try:
         poll(query, platforms, scrapers, name=name, exclude_keywords=exclude_kws)
     finally:
-        for name in ("vinted", "depop", "mercari_jp", "rakuten_jp"):
+        for name in ("ebay", "vinted", "depop", "mercari_jp", "rakuten_jp"):
             if name in scrapers:
                 scrapers[name].close()
         _stop_pw()
