@@ -1146,6 +1146,7 @@ def poll(query: str, platforms: list[str], scrapers: dict, name: str = None, exc
         print(f"\n[{ts}] Checking all platforms...")
 
         for platform in platforms:
+            print(f"  {ICONS[platform]} {platform:<10} — fetching...", flush=True)
             raw_rows         = scrapers[platform].fetch(query)
             rows, dropped    = filter_results(raw_rows, query)
             new_rows         = [r for r in rows if r["item_id"] not in seen[platform]]
