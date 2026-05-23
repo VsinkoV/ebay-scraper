@@ -1015,6 +1015,11 @@ class VintedScraper:
 # ── Depop (Playwright DOM scraping) ──────────────────────────────────────────
 class DepopScraper:
     WEB_BASE = "https://www.depop.com"
+    _STEALTH = (
+        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+        "window.chrome={runtime:{}};"
+        "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
+    )
 
     # JS extracts cards from the product grid.
     # Uses progressively broader selectors so it survives CSS-module class renames.
@@ -1057,9 +1062,13 @@ class DepopScraper:
     }"""
 
     def __init__(self):
-        self._browser = _get_pw().chromium.launch(headless=True)
-        self._ctx     = self._browser.new_context(locale="en-GB", user_agent=UA)
-        self._page    = self._ctx.new_page()
+        self._browser = _get_pw().chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--lang=en-GB"],
+        )
+        self._ctx  = self._browser.new_context(locale="en-GB", user_agent=UA, viewport={"width": 1280, "height": 800})
+        self._ctx.add_init_script(self._STEALTH)
+        self._page = self._ctx.new_page()
         print(f"  {ICONS['depop']} Depop browser ready")
 
     def fetch(self, query: str) -> list[dict]:
@@ -1068,13 +1077,14 @@ class DepopScraper:
             f"?q={requests.utils.quote(query)}&sort=NewestFirst"
         )
         try:
-            self._page.goto(url, wait_until="networkidle", timeout=30_000)
+            self._page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            self._page.wait_for_timeout(3000)
             # Incrementally scroll to trigger infinite-scroll / lazy loading
             for fraction in [0.25, 0.5, 0.75, 1.0, 1.0]:
                 self._page.evaluate(
                     f"window.scrollTo(0, document.body.scrollHeight * {fraction})"
                 )
-                self._page.wait_for_timeout(900)
+                self._page.wait_for_timeout(800)
             cards = self._page.evaluate(self._JS)
         except Exception as e:
             print(f"  ❌ Depop fetch error: {e}")
@@ -1372,13 +1382,15 @@ def poll(query: str, platforms: list[str], scrapers: dict, name: str = None, exc
                     print(f"     £{r['price']:>7}  {size_str}  {r['title'][:45]}{btag}")
                     print(f"              {r['url']}")
                     send_discord(r, query, threshold=threshold)
-                    if threshold and pval < threshold:
-                        print("BARGAIN_ITEM:" + json.dumps({
-                            "platform": platform, "title": r["title"],
-                            "price": r["price"], "url": r.get("url", ""),
-                            "image_url": r.get("image_url", ""),
-                            "savings": round(threshold - pval, 2), "query": query,
-                        }), flush=True)
+                    is_b = bool(threshold and pval < threshold)
+                    print("BARGAIN_ITEM:" + json.dumps({
+                        "platform": platform, "title": r["title"],
+                        "price": r["price"], "url": r.get("url", ""),
+                        "image_url": r.get("image_url", ""),
+                        "is_bargain": is_b,
+                        "savings": round(threshold - pval, 2) if is_b else 0,
+                        "query": query,
+                    }), flush=True)
                     time.sleep(0.5)
                 first_run[platform] = False
                 time.sleep(random.uniform(2, 4))
@@ -1408,13 +1420,15 @@ def poll(query: str, platforms: list[str], scrapers: dict, name: str = None, exc
                     print(f"     {price:>8}  {r['title'][:55]}{bargain}")
                     print(f"             {r['url']}")
                     send_discord(r, query, threshold=threshold)
-                    if threshold and pval < threshold:
-                        print("BARGAIN_ITEM:" + json.dumps({
-                            "platform": platform, "title": r["title"],
-                            "price": r["price"], "url": r.get("url", ""),
-                            "image_url": r.get("image_url", ""),
-                            "savings": round(threshold - pval, 2), "query": query,
-                        }), flush=True)
+                    is_b = bool(threshold and pval < threshold)
+                    print("BARGAIN_ITEM:" + json.dumps({
+                        "platform": platform, "title": r["title"],
+                        "price": r["price"], "url": r.get("url", ""),
+                        "image_url": r.get("image_url", ""),
+                        "is_bargain": is_b,
+                        "savings": round(threshold - pval, 2) if is_b else 0,
+                        "query": query,
+                    }), flush=True)
                     time.sleep(0.5)
             else:
                 print(f"  {ICONS[platform]} {platform:<8} — no new listings")

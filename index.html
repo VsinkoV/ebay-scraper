@@ -504,7 +504,7 @@
   </div>
 
   <button class="tab-btn active" data-tab="tasks">Tasks</button>
-  <button class="tab-btn" data-tab="bargains">Bargains <span class="badge" id="badge-bargains" style="display:none"></span></button>
+  <button class="tab-btn" data-tab="bargains">New Listings <span class="badge" id="badge-bargains" style="display:none"></span></button>
   <button class="tab-btn" data-tab="missed">Missed <span class="badge" id="badge-missed" style="display:none;background:var(--red);color:white"></span></button>
   <button class="tab-btn" data-tab="log">Log</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
@@ -528,7 +528,7 @@
     <button class="btn btn-danger" onclick="openModal()">+ Create</button>
     <div style="width:1px;height:24px;background:var(--border)"></div>
     <span class="stat" id="stat-running">0 Running</span>
-    <span class="stat" id="stat-bargains">0 Bargains</span>
+    <span class="stat" id="stat-bargains">0 New</span>
     <span class="stat" id="stat-tasks">0 Tasks</span>
     <div style="margin-left:auto;display:flex;gap:8px">
       <button class="btn btn-ghost" onclick="stopAll()">■ Stop All</button>
@@ -858,7 +858,7 @@ function updateStats() {
   const running = searches.filter(s => s.running).length;
   document.getElementById('stat-running').textContent  = `${running} Running`;
   document.getElementById('stat-running').className    = `stat ${running ? 'active' : ''}`;
-  document.getElementById('stat-bargains').textContent = `${bargains.length} Bargains`;
+  document.getElementById('stat-bargains').textContent = `${bargains.length} New`;
   document.getElementById('stat-tasks').textContent    = `${searches.length} Tasks`;
   const ns = document.getElementById('nav-status');
   ns.textContent = running ? '● Watching' : '● Idle';
@@ -955,13 +955,13 @@ function renderBargains() {
   const items = sortedBargains();
   if (!items.length) {
     el.innerHTML = `<div class="empty">
-      <div class="empty-title">No bargains yet</div>
-      <div class="empty-sub">Start a watch in Tasks to begin finding bargains</div>
+      <div class="empty-title">No new listings yet</div>
+      <div class="empty-sub">Start a watch in Tasks to begin finding listings</div>
     </div>`;
     updateBadge('bargains', 0);
     return;
   }
-  el.innerHTML = items.map(b => itemRow(b, 'var(--yellow)', false)).join('');
+  el.innerHTML = items.map(b => itemRow(b, b.is_bargain ? 'var(--yellow)' : 'var(--bg3)', false)).join('');
   updateBadge('bargains', items.length);
 }
 
@@ -996,10 +996,11 @@ async function clearMissed() {
 }
 
 function itemRow(item, accentColor, isMissed) {
-  const p     = item.platform || '';
-  const price = item.price ? `£${item.price}` : '?';
-  const saves = item.savings ? `-£${parseFloat(item.savings).toFixed(0)}` : '';
-  const time  = item.sold_at || item.time || '';
+  const p      = item.platform || '';
+  const price  = item.price ? `£${item.price}` : '?';
+  const saves  = item.is_bargain && item.savings ? `🔥 -£${parseFloat(item.savings).toFixed(0)}` :
+                 (item.savings ? `-£${parseFloat(item.savings).toFixed(0)}` : '');
+  const time   = item.sold_at || item.time || '';
   return `
     <div class="item-row">
       <div class="accent" style="background:${accentColor}"></div>
@@ -1008,7 +1009,7 @@ function itemRow(item, accentColor, isMissed) {
         ${PLAT_ICON[p]||'?'} ${p.charAt(0).toUpperCase()+p.slice(1)}
       </div>
       <div class="col-title">${esc(item.title||'')}</div>
-      <div class="col-price" style="color:${isMissed?'var(--red)':'var(--green)'}">${esc(price)}</div>
+      <div class="col-price" style="color:${isMissed?'var(--red)':item.is_bargain?'var(--yellow)':'var(--green)'}">${esc(price)}</div>
       <div class="col-saves" style="color:${isMissed?'var(--muted)':'var(--yellow)'}">${esc(saves)}</div>
       <div class="col-link">
         ${item.url ? `<a class="link-btn" href="${esc(item.url)}" target="_blank" rel="noopener">View →</a>` : ''}
