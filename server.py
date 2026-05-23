@@ -713,6 +713,11 @@ def api_get_searches():
     running  = {n for n, i in pm.instances.items() if i["process"].poll() is None}
     for s in searches:
         s["running"] = s["name"] in running
+        db_stats = _db_query_stats(s["query"])
+        ebay = db_stats.get("ebay", {})
+        s["sold_median"] = ebay.get("median") or _load_sold_median(s["query"])
+        s["sold_mean"]   = ebay.get("mean")
+        s["sold_count"]  = ebay.get("count", 0)
     return searches
 
 

@@ -174,11 +174,14 @@
   }
 
   .row-num   { width: 32px;  color: var(--faint); font-size: 12px; }
-  .row-name  { width: 180px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
-  .row-query { width: 220px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; font-size: 13px; }
-  .row-plats { width: 110px; padding: 0 8px; display: flex; gap: 4px; }
-  .row-interval { width: 80px; padding: 0 8px; color: var(--muted); font-size: 12px; }
-  .row-status { width: 100px; padding: 0 8px; }
+  .row-name  { width: 160px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; }
+  .row-query { width: 180px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 8px; font-size: 13px; }
+  .row-plats { width: 100px; padding: 0 8px; display: flex; gap: 4px; }
+  .row-interval { width: 60px; padding: 0 8px; color: var(--muted); font-size: 12px; }
+  .row-sold  { width: 90px; padding: 0 8px; line-height: 1.3; }
+  .row-sold-val  { font-size: 13px; font-weight: 600; color: var(--yellow); }
+  .row-sold-lbl  { font-size: 10px; color: var(--faint); }
+  .row-status { width: 90px; padding: 0 8px; }
   .row-actions { margin-left: auto; display: flex; gap: 6px; }
 
   .pill {
@@ -812,6 +815,16 @@ function renderTasks() {
       <div class="row-interval">
         ${s.interval_min}m
         ${s.running ? `<span class="countdown" id="cd-${s.name.replace(/\W/g,'_')}"></span>` : ''}
+      </div>
+      <div class="row-sold">
+        ${s.sold_median
+          ? `<div class="row-sold-val">£${parseFloat(s.sold_median).toFixed(2)}</div><div class="row-sold-lbl">median${s.sold_count ? ' ('+s.sold_count+')' : ''}</div>`
+          : `<div class="row-sold-val" style="color:var(--faint)">—</div><div class="row-sold-lbl">median</div>`}
+      </div>
+      <div class="row-sold">
+        ${s.sold_mean
+          ? `<div class="row-sold-val" style="color:var(--muted)">£${parseFloat(s.sold_mean).toFixed(2)}</div><div class="row-sold-lbl">average</div>`
+          : `<div class="row-sold-val" style="color:var(--faint)">—</div><div class="row-sold-lbl">average</div>`}
       </div>
       <div class="row-status">
         <span class="pill ${s.running ? 'running' : 'idle'}">${s.running ? 'RUNNING' : 'IDLE'}</span>
