@@ -735,6 +735,7 @@ let sortMode   = 'newest';
 let editingName = null;
 let intervalVal = 5;
 let ws = null;
+const priceRanges = {}; // { "query|platform": {min, max, count} }
 
 const PLAT_ICON  = { ebay: '🛒', vinted: '👗', depop: '📦', mercari_jp: '🇯🇵', rakuten_jp: '🎌' };
 const PLAT_COLOR = { ebay: 'var(--ebay)', vinted: 'var(--vinted)', depop: 'var(--depop)', mercari_jp: '#ff0211', rakuten_jp: '#bf0000' };
@@ -767,6 +768,11 @@ function connectWS() {
     if (msg.type === 'log')     { appendLog(msg.name, msg.line); }
     if (msg.type === 'bargain') { bargains.unshift(msg.item); renderBargains(); updateStats(); flashTab('bargains'); }
     if (msg.type === 'status')  { loadSearches(); }
+    if (msg.type === 'price_range') {
+      const d = msg.data;
+      priceRanges[d.query + '|' + d.platform] = d;
+      updatePriceRangeRow(d);
+    }
   };
 
   ws.onclose = () => {
@@ -826,6 +832,9 @@ function renderTasks() {
           ? `<div class="row-sold-val" style="color:var(--muted)">£${parseFloat(s.sold_mean).toFixed(2)}</div><div class="row-sold-lbl">average</div>`
           : `<div class="row-sold-val" style="color:var(--faint)">—</div><div class="row-sold-lbl">average</div>`}
       </div>
+      <div class="row-sold" id="range-${s.name.replace(/\W/g,'_')}">
+        <div class="row-sold-val" style="color:var(--faint)">—</div><div class="row-sold-lbl">live range</div>
+      </div>
       <div class="row-status">
         <span class="pill ${s.running ? 'running' : 'idle'}">${s.running ? 'RUNNING' : 'IDLE'}</span>
       </div>
@@ -839,6 +848,15 @@ function renderTasks() {
       </div>
     </div>
   `).join('');
+}
+
+function updatePriceRangeRow(d) {
+  // Find the task row whose query matches and update its live range cell
+  const s = searches.find(x => x.query === d.query);
+  if (!s) return;
+  const el = document.getElementById('range-' + s.name.replace(/\W/g,'_'));
+  if (!el) return;
+  el.innerHTML = `<div class="row-sold-val" style="color:var(--blue)">£${d.min.toFixed(0)}–£${d.max.toFixed(0)}</div><div class="row-sold-lbl">live (${d.count})</div>`;
 }
 
 async function startSearch(name) {

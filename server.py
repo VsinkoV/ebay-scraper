@@ -494,6 +494,14 @@ class ProcessManager:
                             pass
                         continue
 
+                    if line.startswith("PRICE_RANGE:"):
+                        try:
+                            data = json.loads(line[len("PRICE_RANGE:"):])
+                            self._enqueue({"type": "price_range", "data": data})
+                        except Exception:
+                            pass
+                        continue
+
                     self._enqueue({"type": "log", "name": name,
                                    "line": line, "ts": _ts()})
 

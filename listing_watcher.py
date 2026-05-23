@@ -1336,7 +1336,7 @@ def poll(query: str, platforms: list[str], scrapers: dict, name: str = None, exc
                 continue
 
             if new_rows and first_run[platform]:
-                # First ever run — seed the cache, don't Discord blast
+                # First ever run — seed cache and emit ALL items to New Listings tab
                 for r in new_rows:
                     seen[platform].add(r["item_id"])
                 append_rows(csv_path(query, platform), new_rows)
@@ -1344,14 +1344,12 @@ def poll(query: str, platforms: list[str], scrapers: dict, name: str = None, exc
                     [r for r in new_rows if _parse_price(r.get("price","")) != float("inf")],
                     key=lambda r: _parse_price(r["price"])
                 )
-                print(f"  {ICONS[platform]} {platform.capitalize()} — seeded {len(new_rows)} listings  |  cheapest 5:")
-                for r in priced[:5]:
-                    pval       = _parse_price(r["price"])
-                    btag       = " 🔥" if (threshold and pval < threshold) else ""
-                    size_str   = (r.get("size") or "").ljust(7)
-                    print(f"     £{r['price']:>7}  {size_str}  {r['title'][:45]}{btag}")
-                    print(f"              {r['url']}")
-                    send_discord(r, query, threshold=threshold)
+                if priced:
+                    lo = _parse_price(priced[0]["price"])
+                    hi = _parse_price(priced[-1]["price"])
+                    print(f"  {ICONS[platform]} {platform.capitalize()} — seeded {len(new_rows)} listings  |  £{lo:.2f}–£{hi:.2f}")
+                for r in new_rows:
+                    pval = _parse_price(r.get("price", ""))
                     is_b = bool(threshold and pval < threshold)
                     print("BARGAIN_ITEM:" + json.dumps({
                         "platform": platform, "title": r["title"],
@@ -1361,22 +1359,24 @@ def poll(query: str, platforms: list[str], scrapers: dict, name: str = None, exc
                         "savings": round(threshold - pval, 2) if is_b else 0,
                         "query": query,
                     }), flush=True)
-                    time.sleep(0.5)
                 first_run[platform] = False
                 time.sleep(random.uniform(2, 4))
                 continue
 
             first_run[platform] = False
 
-            # Show cheapest listing currently on the platform
-            priced = [r for r in rows if _parse_price(r.get("price", "")) != float("inf")]
+            # Show price range currently on the platform
+            priced = sorted([r for r in rows if _parse_price(r.get("price", "")) != float("inf")],
+                            key=lambda r: _parse_price(r["price"]))
             if priced:
-                cheapest = min(priced, key=lambda r: _parse_price(r["price"]))
-                bargain_tag = " 🔥" if (threshold and _parse_price(cheapest["price"]) < threshold) else ""
-                print(f"  {ICONS[platform]} {platform:<8} — cheapest: "
-                      f"£{cheapest['price']}  {cheapest.get('size') or '':>6}  "
-                      f"{cheapest['title'][:40]}{bargain_tag}")
-                print(f"             {cheapest['url']}")
+                lo  = _parse_price(priced[0]["price"])
+                hi  = _parse_price(priced[-1]["price"])
+                btag = " 🔥" if (threshold and lo < threshold) else ""
+                print(f"  {ICONS[platform]} {platform:<8} — £{lo:.2f}–£{hi:.2f}  ({len(priced)} listings){btag}")
+                print("PRICE_RANGE:" + json.dumps({
+                    "platform": platform, "query": query,
+                    "min": lo, "max": hi, "count": len(priced),
+                }), flush=True)
 
             if new_rows:
                 append_rows(csv_path(query, platform), new_rows)
