@@ -16,6 +16,7 @@ import json
 import os
 import queue
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -98,9 +99,84 @@ MISSED_FILE         = DATASETS_DIR / "missed_deals.json"
 THRESHOLDS_FILE     = DATASETS_DIR / "thresholds.json"
 APPROVED_EMAILS_FILE = DATASETS_DIR / "approved_emails.json"
 USED_CODES_FILE      = DATASETS_DIR / "used_codes.json"
+SOLD_DB_PATH        = DATASETS_DIR / "sold_listings.db"
 PYTHON              = sys.executable
 
 DATASETS_DIR.mkdir(exist_ok=True)
+
+
+# ── Sold DB helpers (read-only — writes happen inside listing_watcher.py) ─────
+def _db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(SOLD_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sold_listings (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform   TEXT NOT NULL,
+            item_id    TEXT NOT NULL,
+            query      TEXT NOT NULL,
+            title      TEXT,
+            price_gbp  REAL,
+            price_raw  TEXT,
+            currency   TEXT DEFAULT 'GBP',
+            condition  TEXT,
+            date_sold  TEXT,
+            url        TEXT,
+            fetched_at TEXT,
+            UNIQUE(platform, item_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sl_query    ON sold_listings(query)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sl_platform ON sold_listings(platform)")
+    conn.commit()
+    return conn
+
+
+def _db_stats() -> dict:
+    try:
+        with _db_connect() as conn:
+            total   = conn.execute("SELECT COUNT(*) FROM sold_listings").fetchone()[0]
+            queries = conn.execute("SELECT COUNT(DISTINCT query) FROM sold_listings").fetchone()[0]
+            plats   = conn.execute(
+                "SELECT platform, COUNT(*) c FROM sold_listings GROUP BY platform ORDER BY c DESC"
+            ).fetchall()
+            oldest  = conn.execute("SELECT MIN(fetched_at) FROM sold_listings").fetchone()[0]
+            newest  = conn.execute("SELECT MAX(fetched_at) FROM sold_listings").fetchone()[0]
+        return {
+            "total": total, "queries": queries,
+            "platforms": {r["platform"]: r["c"] for r in plats},
+            "oldest": oldest, "newest": newest,
+        }
+    except Exception:
+        return {"total": 0, "queries": 0, "platforms": {}, "oldest": None, "newest": None}
+
+
+def _db_query_stats(query: str) -> dict:
+    q = query.lower().strip()
+    try:
+        with _db_connect() as conn:
+            rows = conn.execute("""
+                SELECT platform, price_gbp FROM sold_listings
+                WHERE LOWER(query)=? AND price_gbp IS NOT NULL AND price_gbp > 0
+            """, (q,)).fetchall()
+        if not rows:
+            return {}
+        by_plat: dict[str, list] = {}
+        for r in rows:
+            by_plat.setdefault(r["platform"], []).append(r["price_gbp"])
+        result = {}
+        for plat, prices in by_plat.items():
+            prices.sort()
+            n = len(prices)
+            result[plat] = {
+                "count": n, "median": round(prices[n // 2], 2),
+                "mean":  round(sum(prices) / n, 2),
+                "min":   round(prices[0], 2), "max": round(prices[-1], 2),
+            }
+        return result
+    except Exception:
+        return {}
 
 
 def _load_approved_emails() -> set:
@@ -790,6 +866,41 @@ def api_get_queries():
         sl = _slug(s["query"])
         slugs[sl] = s["query"]
     return list(slugs.values())
+
+
+# ── Sold DB endpoints ─────────────────────────────────────────────────────────
+@app.get("/api/db/stats")
+def api_db_stats():
+    return _db_stats()
+
+
+@app.get("/api/db/query")
+def api_db_query(q: str = ""):
+    if not q:
+        return {}
+    return _db_query_stats(q)
+
+
+@app.post("/api/db/scrape")
+async def api_db_scrape(request: Request):
+    """Kick off a sold-data scrape for a query in a background thread."""
+    body = await request.json()
+    query    = (body.get("query") or "").strip()
+    platform = (body.get("platform") or "ebay").strip()
+    if not query:
+        raise HTTPException(400, "query required")
+    if platform not in ("ebay", "mercari_jp"):
+        raise HTTPException(400, f"platform '{platform}' does not support sold data")
+
+    def _run():
+        import listing_watcher as lw
+        if platform == "ebay":
+            lw.scrape_ebay_sold(query, max_pages=5)
+        elif platform == "mercari_jp":
+            lw.scrape_mercari_jp_sold(query)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "message": f"Scraping {platform} sold data for '{query}' in background"}
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────

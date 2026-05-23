@@ -16,6 +16,7 @@ import json
 import os
 import re
 import random
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
@@ -57,6 +58,102 @@ DATASETS_DIR        = Path("datasets")
 DATASETS_DIR.mkdir(exist_ok=True)
 SAVED_SEARCHES_FILE = DATASETS_DIR / "saved_searches.json"
 THRESHOLDS_FILE     = DATASETS_DIR / "thresholds.json"
+SOLD_DB_PATH        = DATASETS_DIR / "sold_listings.db"
+
+# ── Sold-listings SQLite DB ───────────────────────────────────────────────────
+def _db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(SOLD_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sold_listings (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform    TEXT    NOT NULL,
+            item_id     TEXT    NOT NULL,
+            query       TEXT    NOT NULL,
+            title       TEXT,
+            price_gbp   REAL,
+            price_raw   TEXT,
+            currency    TEXT    DEFAULT 'GBP',
+            condition   TEXT,
+            date_sold   TEXT,
+            url         TEXT,
+            fetched_at  TEXT,
+            UNIQUE(platform, item_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sl_query    ON sold_listings(query)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sl_platform ON sold_listings(platform)")
+    conn.commit()
+    return conn
+
+
+def db_insert_sold(rows: list[dict]) -> int:
+    """Insert rows into the shared sold DB. Returns count of newly inserted rows."""
+    if not rows:
+        return 0
+    with _db_connect() as conn:
+        cur = conn.executemany("""
+            INSERT OR IGNORE INTO sold_listings
+                (platform, item_id, query, title, price_gbp, price_raw,
+                 currency, condition, date_sold, url, fetched_at)
+            VALUES
+                (:platform, :item_id, :query, :title, :price_gbp, :price_raw,
+                 :currency, :condition, :date_sold, :url, :fetched_at)
+        """, rows)
+        conn.commit()
+        return cur.rowcount
+
+
+def db_stats() -> dict:
+    """Return high-level DB stats for the settings/info page."""
+    try:
+        with _db_connect() as conn:
+            total   = conn.execute("SELECT COUNT(*) FROM sold_listings").fetchone()[0]
+            queries = conn.execute("SELECT COUNT(DISTINCT query) FROM sold_listings").fetchone()[0]
+            plats   = conn.execute(
+                "SELECT platform, COUNT(*) c FROM sold_listings GROUP BY platform ORDER BY c DESC"
+            ).fetchall()
+            oldest  = conn.execute("SELECT MIN(fetched_at) FROM sold_listings").fetchone()[0]
+            newest  = conn.execute("SELECT MAX(fetched_at) FROM sold_listings").fetchone()[0]
+        return {
+            "total": total, "queries": queries,
+            "platforms": {r["platform"]: r["c"] for r in plats},
+            "oldest": oldest, "newest": newest,
+        }
+    except Exception:
+        return {"total": 0, "queries": 0, "platforms": {}, "oldest": None, "newest": None}
+
+
+def db_query_stats(query: str) -> dict:
+    """Return price stats for a specific query across all platforms."""
+    q = query.lower().strip()
+    try:
+        with _db_connect() as conn:
+            rows = conn.execute("""
+                SELECT platform, price_gbp FROM sold_listings
+                WHERE LOWER(query)=? AND price_gbp IS NOT NULL AND price_gbp > 0
+            """, (q,)).fetchall()
+        if not rows:
+            return {}
+        by_plat: dict[str, list[float]] = {}
+        for r in rows:
+            by_plat.setdefault(r["platform"], []).append(r["price_gbp"])
+        result = {}
+        for plat, prices in by_plat.items():
+            prices.sort()
+            n = len(prices)
+            result[plat] = {
+                "count":  n,
+                "median": round(prices[n // 2], 2),
+                "mean":   round(sum(prices) / n, 2),
+                "min":    round(prices[0], 2),
+                "max":    round(prices[-1], 2),
+            }
+        return result
+    except Exception:
+        return {}
+
 
 POLL_INTERVAL  = 300      # seconds between full poll cycles
 VINTED_MAX     = 96
@@ -270,6 +367,30 @@ def scrape_ebay_sold(query: str, max_pages: int = 5, min_records: int = 0) -> fl
         w.writerows(all_rows)
     print(f"  💾 Saved {len(all_rows)} records → {sold_path}")
 
+    # Write to shared DB
+    now = datetime.now(timezone.utc).isoformat()
+    db_rows = []
+    for r in all_rows:
+        try:
+            price_gbp = float(r["price"]) if r["price"] else None
+        except ValueError:
+            price_gbp = None
+        db_rows.append({
+            "platform":   "ebay",
+            "item_id":    r.get("url", "").rstrip("/").split("/")[-1].split("?")[0] or r["title"][:40],
+            "query":      query,
+            "title":      r.get("title", ""),
+            "price_gbp":  price_gbp,
+            "price_raw":  r.get("price", ""),
+            "currency":   "GBP",
+            "condition":  r.get("condition", ""),
+            "date_sold":  r.get("date_sold", ""),
+            "url":        r.get("url", ""),
+            "fetched_at": now,
+        })
+    inserted = db_insert_sold(db_rows)
+    print(f"  🗄️  DB: {inserted} new rows added ({len(db_rows) - inserted} already existed)")
+
     prices = []
     for r in all_rows:
         try:
@@ -285,6 +406,80 @@ def scrape_ebay_sold(query: str, max_pages: int = 5, min_records: int = 0) -> fl
     print(f"  📊 Median: £{median:.2f}  |  Mean: £{sum(prices)/len(prices):.2f}"
           f"  |  Min: £{min(prices):.2f}  |  Max: £{max(prices):.2f}")
     return median
+
+
+def scrape_mercari_jp_sold(query: str) -> int:
+    """
+    Scrape Mercari JP sold/trading listings and write to shared DB.
+    Returns number of new rows inserted.
+    """
+    print(f"\n  🇯🇵 Scraping Mercari JP sold listings for '{query}'...")
+    browser = _get_pw().chromium.launch(headless=True)
+    ctx  = browser.new_context(user_agent=UA, locale="ja-JP")
+    page = ctx.new_page()
+
+    api_items: list[dict] = []
+
+    def _on_response(resp):
+        if "api.mercari.jp/v2/entities:search" in resp.url and resp.status == 200:
+            try:
+                data = resp.json()
+                api_items.extend(data.get("items", []))
+            except Exception:
+                pass
+
+    page.on("response", _on_response)
+
+    url = (
+        f"https://jp.mercari.com/search?keyword={requests.utils.quote(query)}"
+        "&status=sold_out&sort=created_time&order=desc"
+    )
+    try:
+        page.goto(url, wait_until="networkidle", timeout=30_000)
+        page.wait_for_timeout(3000)
+    except Exception as e:
+        print(f"  ❌ Mercari JP sold error: {e}")
+    finally:
+        browser.close()
+
+    if not api_items:
+        print("  ❌ No sold items found.")
+        return 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    db_rows = []
+    for it in api_items:
+        try:
+            price_jpy = int(it.get("price", 0) or 0)
+            price_gbp = _jpy_to_gbp(price_jpy) if price_jpy else None
+            thumb = (it.get("thumbnails") or it.get("photos") or [""])[0]
+            db_rows.append({
+                "platform":  "mercari_jp",
+                "item_id":   it["id"],
+                "query":     query,
+                "title":     it.get("name") or it.get("title") or "",
+                "price_gbp": price_gbp,
+                "price_raw": str(price_jpy),
+                "currency":  "GBP",
+                "condition": str(it.get("itemConditionId") or ""),
+                "date_sold": datetime.fromtimestamp(
+                    int(it.get("updated") or it.get("created") or 0), tz=timezone.utc
+                ).isoformat() if (it.get("updated") or it.get("created")) else "",
+                "url":       f"https://jp.mercari.com/item/{it['id']}",
+                "fetched_at": now,
+            })
+        except Exception:
+            continue
+
+    inserted = db_insert_sold(db_rows)
+    print(f"  ✅ {len(db_rows)} items scraped → {inserted} new rows added to DB")
+    if db_rows:
+        prices_gbp = [r["price_gbp"] for r in db_rows if r["price_gbp"]]
+        if prices_gbp:
+            prices_gbp.sort()
+            n = len(prices_gbp)
+            print(f"  📊 Median: £{prices_gbp[n//2]:.2f}  Min: £{prices_gbp[0]:.2f}  Max: £{prices_gbp[-1]:.2f}")
+    return inserted
 
 
 def load_ebay_threshold(query: str) -> float | None:

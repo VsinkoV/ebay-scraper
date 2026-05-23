@@ -308,6 +308,13 @@
   /* ── Settings ── */
   .settings-wrap { padding: 32px; max-width: 700px; overflow-y: auto; flex: 1; }
 
+  .db-stat-card {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px; text-align: center;
+  }
+  .db-stat-num   { font-size: 22px; font-weight: 800; color: var(--green); }
+  .db-stat-label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
   .settings-section {
     display: flex; align-items: center; gap: 10px;
     margin: 28px 0 12px;
@@ -586,9 +593,39 @@
 <!-- ══════════════ SETTINGS ══════════════ -->
 <div class="page" id="page-settings">
   <div class="settings-wrap">
+
+    <div class="settings-section" style="--c:var(--green)">Sold Price Database</div>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:16px">
+      Every sold-data scrape feeds a shared database that grows over time.
+      The more searches run, the richer the pricing history becomes.
+    </p>
+    <div id="db-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">
+      <div class="db-stat-card"><div class="db-stat-num" id="db-total">—</div><div class="db-stat-label">Total records</div></div>
+      <div class="db-stat-card"><div class="db-stat-num" id="db-queries">—</div><div class="db-stat-label">Unique searches</div></div>
+      <div class="db-stat-card"><div class="db-stat-num" id="db-newest">—</div><div class="db-stat-label">Last updated</div></div>
+    </div>
+    <div id="db-platform-breakdown" style="font-size:12px;color:var(--muted);margin-bottom:20px"></div>
+
+    <div class="settings-row" style="align-items:flex-end">
+      <div class="settings-label">
+        <b>Scrape Sold Data</b>
+        <small>Fetch sold/completed listings for a query</small>
+      </div>
+      <div style="display:flex;gap:8px;flex:1">
+        <input class="settings-input" id="db-query-input" placeholder="e.g. nintendo switch" style="flex:1">
+        <select class="settings-input" id="db-platform-select" style="width:140px">
+          <option value="ebay">🛒 eBay UK</option>
+          <option value="mercari_jp">🇯🇵 Mercari JP</option>
+        </select>
+        <button class="btn btn-primary" onclick="triggerSoldScrape()">Scrape</button>
+      </div>
+    </div>
+    <span class="save-msg" id="db-scrape-msg" style="display:block;margin-top:8px"></span>
+
+    <hr style="margin:24px 0">
+
     <div class="settings-section">Discord Notifications</div>
     <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Server Settings → Integrations → Webhooks → New Webhook → Copy URL</p>
-
     <div class="settings-row">
       <div class="settings-label">
         <b>Webhook URL</b>
@@ -1010,6 +1047,36 @@ function clearLog() {
 async function loadSettings() {
   const s = await api('GET', '/api/settings');
   if (s.discord_webhook_set) document.getElementById('s-webhook').placeholder = '●●●●● (saved)';
+  loadDbStats();
+}
+
+async function loadDbStats() {
+  try {
+    const s = await api('GET', '/api/db/stats');
+    document.getElementById('db-total').textContent   = s.total?.toLocaleString() ?? '0';
+    document.getElementById('db-queries').textContent = s.queries?.toLocaleString() ?? '0';
+    const d = s.newest ? new Date(s.newest).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}) : 'Never';
+    document.getElementById('db-newest').textContent  = d;
+    const breakdown = Object.entries(s.platforms || {})
+      .map(([p, c]) => `${PLAT_ICON[p] || p} ${p}: ${c.toLocaleString()}`)
+      .join('  ·  ');
+    document.getElementById('db-platform-breakdown').textContent = breakdown;
+  } catch(e) {}
+}
+
+async function triggerSoldScrape() {
+  const query    = document.getElementById('db-query-input').value.trim();
+  const platform = document.getElementById('db-platform-select').value;
+  const msg      = document.getElementById('db-scrape-msg');
+  if (!query) { msg.textContent = '⚠ Enter a query first'; return; }
+  msg.textContent = `⏳ Scraping ${platform} sold data for "${query}"…`;
+  try {
+    await api('POST', '/api/db/scrape', { query, platform });
+    msg.textContent = '✓ Scrape started — check log tab for progress';
+    setTimeout(() => loadDbStats(), 15000);
+  } catch(e) {
+    msg.textContent = '❌ ' + (e.message || 'error');
+  }
 }
 
 async function saveSettings() {
