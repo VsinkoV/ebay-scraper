@@ -27,6 +27,7 @@ from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request as StarletteRequest
 from pydantic import BaseModel
 
 # ── Google OAuth + session auth ───────────────────────────────────────────────
@@ -76,20 +77,10 @@ class AuthMiddleware:
         if path in OPEN_PATHS or path.startswith("/ws"):
             await self.app(scope, receive, send)
             return
-        # Parse session cookie from headers
-        cookies = {}
-        for name, value in scope.get("headers", []):
-            if name == b"cookie":
-                for part in value.decode().split(";"):
-                    if "=" in part:
-                        k, v = part.strip().split("=", 1)
-                        cookies[k.strip()] = v.strip()
-        session = cookies.get("session", "")
+        req = StarletteRequest(scope)
+        session = req.cookies.get("session", "")
         if not _verify_session(session):
-            accept = ""
-            for name, value in scope.get("headers", []):
-                if name == b"accept":
-                    accept = value.decode()
+            accept = req.headers.get("accept", "")
             if accept.startswith("text/html"):
                 response = RedirectResponse("/auth/login")
             else:
