@@ -414,9 +414,11 @@
     transition: all 0.15s;
     display: flex; align-items: center; gap: 6px;
   }
-  .plat-toggle.selected-ebay   { border-color: var(--ebay);   color: var(--ebay);   background: rgba(229,50,56,0.12); }
-  .plat-toggle.selected-vinted { border-color: var(--vinted); color: var(--vinted); background: rgba(9,177,186,0.12); }
-  .plat-toggle.selected-depop  { border-color: var(--depop);  color: var(--depop);  background: rgba(255,64,64,0.12); }
+  .plat-toggle.selected-ebay       { border-color: var(--ebay);   color: var(--ebay);   background: rgba(229,50,56,0.12); }
+  .plat-toggle.selected-vinted     { border-color: var(--vinted); color: var(--vinted); background: rgba(9,177,186,0.12); }
+  .plat-toggle.selected-depop      { border-color: var(--depop);  color: var(--depop);  background: rgba(255,64,64,0.12); }
+  .plat-toggle.selected-mercari_jp { border-color: #ff0211; color: #ff0211; background: rgba(255,2,17,0.12); }
+  .plat-toggle.selected-yahoo_jp   { border-color: #ff0034; color: #ff0034; background: rgba(255,0,52,0.12); }
 
   .interval-row { display: flex; align-items: center; gap: 8px; }
   .interval-val {
@@ -647,6 +649,8 @@
           <div class="plat-toggle selected-ebay" data-plat="ebay" onclick="togglePlat(this)">🛒 eBay</div>
           <div class="plat-toggle selected-vinted" data-plat="vinted" onclick="togglePlat(this)">👗 Vinted</div>
           <div class="plat-toggle selected-depop" data-plat="depop" onclick="togglePlat(this)">📦 Depop</div>
+          <div class="plat-toggle" data-plat="mercari_jp" onclick="togglePlat(this)">🇯🇵 Mercari JP</div>
+          <div class="plat-toggle" data-plat="yahoo_jp" onclick="togglePlat(this)">🏯 Yahoo JP</div>
         </div>
       </div>
       <div class="field">
@@ -711,8 +715,8 @@ let editingName = null;
 let intervalVal = 5;
 let ws = null;
 
-const PLAT_ICON  = { ebay: '🛒', vinted: '👗', depop: '📦' };
-const PLAT_COLOR = { ebay: 'var(--ebay)', vinted: 'var(--vinted)', depop: 'var(--depop)' };
+const PLAT_ICON  = { ebay: '🛒', vinted: '👗', depop: '📦', mercari_jp: '🇯🇵', yahoo_jp: '🏯' };
+const PLAT_COLOR = { ebay: 'var(--ebay)', vinted: 'var(--vinted)', depop: 'var(--depop)', mercari_jp: '#ff0211', yahoo_jp: '#ff0034' };
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 document.querySelectorAll('.tab-btn').forEach(btn => {
