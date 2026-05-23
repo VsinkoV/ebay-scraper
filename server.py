@@ -488,6 +488,10 @@ class SettingsIn(BaseModel):
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
+@app.get("/ping")
+def ping():
+    return HTMLResponse("pong-v6")
+
 @app.get("/auth/login")
 def auth_login():
     if not GOOGLE_CLIENT_ID:
