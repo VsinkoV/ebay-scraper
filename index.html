@@ -102,8 +102,27 @@
   .tab-btn[data-tab="missed"].active::after   { background: var(--red); }
   .tab-btn[data-tab="log"].active      { color: var(--purple); background: rgba(167,139,250,0.12); }
   .tab-btn[data-tab="log"].active::after      { background: var(--purple); }
+  .tab-btn[data-tab="alerts"].active   { color: var(--orange, #f97316); background: rgba(249,115,22,0.12); }
+  .tab-btn[data-tab="alerts"].active::after   { background: var(--orange, #f97316); }
   .tab-btn[data-tab="settings"].active { color: var(--green);  background: rgba(34,197,94,0.12); }
   .tab-btn[data-tab="settings"].active::after { background: var(--green); }
+
+  /* ── Alerts tab ── */
+  .alert-row { border-bottom: 1px solid var(--border); padding: 18px 20px; }
+  .alert-row:last-child { border-bottom: none; }
+  .alert-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .alert-name   { font-weight: 700; font-size: 15px; }
+  .alert-query  { color: var(--muted); font-size: 13px; }
+  .alert-median { color: var(--yellow); font-size: 13px; font-weight: 600; }
+  .alert-count  { color: var(--faint); font-size: 12px; }
+  .alert-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .alert-controls label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  .alert-controls input[type=number] { width: 70px; background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 4px 8px; font-size: 13px; }
+  .alert-controls input[type=radio]  { accent-color: var(--blue); }
+  .alert-sep { color: var(--border); }
+  .scrape-settings { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  .scrape-settings label { color: var(--faint); font-size: 12px; display: flex; align-items: center; gap: 4px; }
+  .scrape-settings input[type=number] { width: 55px; background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 3px 6px; font-size: 12px; }
 
   .badge {
     display: inline-flex; align-items: center; justify-content: center;
@@ -509,6 +528,7 @@
   <button class="tab-btn active" data-tab="tasks">Tasks</button>
   <button class="tab-btn" data-tab="bargains">New Listings <span class="badge" id="badge-bargains" style="display:none"></span></button>
   <button class="tab-btn" data-tab="missed">Missed <span class="badge" id="badge-missed" style="display:none;background:var(--red);color:white"></span></button>
+  <button class="tab-btn" data-tab="alerts">Alerts</button>
   <button class="tab-btn" data-tab="log">Log</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
 
@@ -560,6 +580,18 @@
     <span style="width:72px;padding:0 8px">Link</span>
   </div>
   <div class="scroll-area" id="bargains-list"></div>
+</div>
+
+<!-- ══════════════ ALERTS ══════════════ -->
+<div class="page" id="page-alerts">
+  <div class="toolbar">
+    <span style="color:var(--muted);font-size:12px;font-weight:600">Alert Thresholds</span>
+    <span style="color:var(--muted);font-size:12px">· Set bargain price per search — % of eBay median or fixed £</span>
+    <div style="margin-left:auto"><button class="btn btn-ghost" onclick="loadAlerts()">↻ Refresh</button></div>
+  </div>
+  <div class="scroll-area" id="alerts-list">
+    <div class="empty"><div class="empty-title">Loading…</div></div>
+  </div>
 </div>
 
 <!-- ══════════════ MISSED ══════════════ -->
@@ -747,6 +779,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('page-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'alerts') loadAlerts();
   });
 });
 
@@ -797,6 +830,88 @@ async function loadSearches() {
   searches = await api('GET', '/api/searches');
   renderTasks();
   updateStats();
+}
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+async function loadAlerts() {
+  const [allSearches, thresholds] = await Promise.all([
+    api('GET', '/api/searches'),
+    api('GET', '/api/thresholds'),
+  ]);
+  const el = document.getElementById('alerts-list');
+  if (!allSearches.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-title">No searches yet</div><div class="empty-sub">Create a search in the Tasks tab first</div></div>`;
+    return;
+  }
+  el.innerHTML = allSearches.map(s => {
+    const th = thresholds[s.name] || { mode: 'percent', percent: 50, fixed: '', min_records: 20 };
+    const medText = s.sold_median ? `eBay sold median: <span class="alert-median">£${parseFloat(s.sold_median).toFixed(2)}</span> <span class="alert-count">(${s.sold_count || 0} records)</span>` : `<span class="alert-count">No sold data yet — scrape below</span>`;
+    const id = s.name.replace(/\W/g,'_');
+    return `<div class="alert-row" id="alert-${id}">
+      <div class="alert-header">
+        <span class="alert-name">${esc(s.name)}</span>
+        <span class="alert-query">· ${esc(s.query)}</span>
+        <span>${medText}</span>
+      </div>
+      <div class="alert-controls">
+        <label><input type="radio" name="mode-${id}" value="percent" ${th.mode!=='fixed'?'checked':''}> eBay Median</label>
+        <input type="number" id="pct-${id}" value="${th.percent||50}" min="1" max="200" style="width:60px">
+        <span style="color:var(--muted);font-size:13px">%</span>
+        <span class="alert-sep">|</span>
+        <label><input type="radio" name="mode-${id}" value="fixed" ${th.mode==='fixed'?'checked':''}> Fixed price £</label>
+        <input type="number" id="fix-${id}" value="${th.fixed||''}" min="0" step="0.01" placeholder="e.g. 50">
+        <button class="btn btn-blue btn-sm" onclick="saveThreshold('${esc(s.name)}')">Save</button>
+        <span class="alert-sep" style="margin-left:8px">|</span>
+        <div class="scrape-settings">
+          <label>Pages: <input type="number" id="pages-${id}" value="5" min="1" max="20"></label>
+          <label>Min records: <input type="number" id="minrec-${id}" value="20" min="0"></label>
+          <button class="btn btn-ghost btn-sm" onclick="scrapeEbaySold('${esc(s.name)}','${esc(s.query)}')">Scrape eBay Sold</button>
+          <button class="btn btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteSearchData('${esc(s.name)}','${esc(s.query)}')">Delete Data</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function saveThreshold(name) {
+  const id  = name.replace(/\W/g,'_');
+  const mode = document.querySelector(`input[name="mode-${id}"]:checked`)?.value || 'percent';
+  const body = {
+    mode,
+    percent:     parseInt(document.getElementById(`pct-${id}`)?.value || 50),
+    fixed:       parseFloat(document.getElementById(`fix-${id}`)?.value) || null,
+    min_records: 20,
+  };
+  await api('PUT', `/api/thresholds/${encodeURIComponent(name)}`, body);
+  showToast(`Threshold saved for "${name}"`);
+}
+
+async function scrapeEbaySold(name, query) {
+  const id = name.replace(/\W/g,'_');
+  const pages   = parseInt(document.getElementById(`pages-${id}`)?.value || 5);
+  const minrec  = parseInt(document.getElementById(`minrec-${id}`)?.value || 20);
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = 'Scraping…';
+  await api('POST', '/api/db/scrape', { query, platform: 'ebay', pages, min_records: minrec });
+  showToast(`Scraping eBay sold for "${query}" in background…`);
+  setTimeout(() => { btn.disabled = false; btn.textContent = 'Scrape eBay Sold'; loadAlerts(); }, 8000);
+}
+
+async function deleteSearchData(name, query) {
+  if (!confirm(`Delete all sold data for "${name}"?`)) return;
+  await Promise.all([
+    api('DELETE', `/api/thresholds/${encodeURIComponent(name)}`),
+    api('DELETE', `/api/db/query?q=${encodeURIComponent(query)}`),
+  ]);
+  showToast(`Data deleted for "${name}"`);
+  loadAlerts();
+}
+
+function showToast(msg) {
+  let t = document.getElementById('toast');
+  if (!t) { t = document.createElement('div'); t.id = 'toast'; t.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:8px;font-size:13px;z-index:999;pointer-events:none'; document.body.appendChild(t); }
+  t.textContent = msg; t.style.opacity = '1';
+  setTimeout(() => t.style.opacity = '0', 3000);
 }
 
 function renderTasks() {

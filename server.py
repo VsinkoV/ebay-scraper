@@ -829,6 +829,14 @@ def api_set_threshold(name: str, body: ThresholdIn):
     return {"ok": True}
 
 
+@app.delete("/api/thresholds/{name}")
+def api_delete_threshold(name: str):
+    th = load_thresholds()
+    th.pop(name, None)
+    save_thresholds(th)
+    return {"ok": True}
+
+
 # ── REST: Settings ────────────────────────────────────────────────────────────
 @app.get("/api/settings")
 def api_get_settings():
@@ -897,12 +905,27 @@ def api_db_query(q: str = ""):
     return _db_query_stats(q)
 
 
+@app.delete("/api/db/query")
+def api_db_delete_query(q: str = ""):
+    if not q:
+        raise HTTPException(400, "q required")
+    query = q.lower().strip()
+    try:
+        with _db_connect() as conn:
+            conn.execute("DELETE FROM sold_listings WHERE LOWER(query)=?", (query,))
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+    return {"ok": True}
+
+
 @app.post("/api/db/scrape")
 async def api_db_scrape(request: Request):
     """Kick off a sold-data scrape for a query in a background thread."""
     body = await request.json()
-    query    = (body.get("query") or "").strip()
-    platform = (body.get("platform") or "ebay").strip()
+    query       = (body.get("query") or "").strip()
+    platform    = (body.get("platform") or "ebay").strip()
+    max_pages   = int(body.get("pages") or 5)
+    min_records = int(body.get("min_records") or 0)
     if not query:
         raise HTTPException(400, "query required")
     if platform not in ("ebay", "mercari_jp"):
@@ -911,7 +934,7 @@ async def api_db_scrape(request: Request):
     def _run():
         import listing_watcher as lw
         if platform == "ebay":
-            lw.scrape_ebay_sold(query, max_pages=5)
+            lw.scrape_ebay_sold(query, max_pages=max_pages, min_records=min_records)
         elif platform == "mercari_jp":
             lw.scrape_mercari_jp_sold(query)
 

@@ -302,24 +302,29 @@ def _parse_sold_page(page) -> list[dict]:
 
 
 def scrape_ebay_sold(query: str, max_pages: int = 5, min_records: int = 0) -> float | None:
-    """
-    Scrape eBay UK sold listings, save CSV, return median price.
-    Opens a visible browser window so CAPTCHAs can be solved manually.
-    If min_records > 0 and fewer records are collected, a warning is printed.
-    """
+    """Scrape eBay UK sold listings, save CSV, return median price."""
+    _STEALTH = (
+        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+        "window.chrome={runtime:{}};"
+        "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
+    )
     slug      = re.sub(r"[^a-z0-9]+", "_", query.lower()).strip("_")
     sold_path = DATASETS_DIR / f"{slug}_sold.csv"
 
     print(f"\n  🔍 Scraping eBay UK sold listings for '{query}'...")
     browser = _get_pw().chromium.launch(
-        headless=False,
-        args=["--disable-blink-features=AutomationControlled"],
+        headless=True,
+        args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--lang=en-GB"],
     )
     ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 800})
-    ctx.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
+    ctx.add_init_script(_STEALTH)
     page = ctx.new_page()
+    # Seed eBay session cookie
+    try:
+        page.goto("https://www.ebay.co.uk", wait_until="domcontentloaded", timeout=15_000)
+        page.wait_for_timeout(1500)
+    except Exception:
+        pass
 
     all_rows = []
     for page_num in range(1, max_pages + 1):
@@ -327,22 +332,34 @@ def scrape_ebay_sold(query: str, max_pages: int = 5, min_records: int = 0) -> fl
         print(f"  [Page {page_num}] Fetching...")
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_selector(
-                "li.s-card[data-listingid], iframe[title*='challenge']", timeout=30_000
-            )
+            page.wait_for_timeout(2000)
+            # Try primary selector, fall back to any s-card
+            try:
+                page.wait_for_selector(
+                    "li.s-card[data-listingid], li[data-view='mi:1686|iid:1']",
+                    timeout=15_000,
+                )
+            except Exception:
+                pass  # Parse whatever is on the page
         except Exception as e:
             print(f"  ❌ Page {page_num} error: {e}")
             break
 
-        if page.query_selector("iframe[title*='challenge']"):
-            print("  ⚠️  CAPTCHA — solve it in the browser window, then press Enter.")
-            try:
-                input()
-            except EOFError:
-                print("  ↻  Non-interactive mode — waiting 60 s for CAPTCHA...")
-                time.sleep(60)
-
         rows = _parse_sold_page(page)
+        if not rows:
+            # Try JS-based extraction as fallback
+            raw = page.evaluate(r"""() => {
+                return Array.from(document.querySelectorAll('li.s-card[data-listingid], li[data-view]'))
+                    .filter(el => el.querySelector('a[href*="ebay.co.uk/itm/"]'))
+                    .map(el => {
+                        const t = el.querySelector('.s-card__title, h3, .lvtitle');
+                        const p = el.querySelector('.s-card__price, .s-item__price');
+                        return { title: t ? t.innerText.trim() : '', price: p ? p.innerText.trim() : '' };
+                    }).filter(r => r.title && r.price);
+            }""")
+            if raw:
+                rows = [{"title": r["title"], "price": r["price"],
+                         "condition": "", "date_sold": "", "url": ""} for r in raw]
         all_rows.extend(rows)
         print(f"     {len(rows)} listings (total so far: {len(all_rows)})")
 
@@ -1056,7 +1073,10 @@ class DepopScraper:
         url = f"{self.WEB_BASE}/search/?q={requests.utils.quote(query)}&sort=NewestFirst"
         try:
             self._page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            self._page.wait_for_timeout(3000)
+            try:
+                self._page.wait_for_selector("a[href*='/products/']", timeout=12_000)
+            except Exception:
+                self._page.wait_for_timeout(4000)
             cards = self._page.evaluate(self._JS)
         except Exception as e:
             print(f"  ❌ Depop fetch error: {e}")
