@@ -568,7 +568,7 @@
     <button class="sort-btn" data-sort="price_asc" onclick="setSortBargains('price_asc',this)">Price ↑</button>
     <button class="sort-btn" data-sort="price_desc" onclick="setSortBargains('price_desc',this)">Price ↓</button>
     <div style="margin-left:auto;display:flex;gap:8px">
-      <button class="sort-btn" id="btn-sold-filter" onclick="toggleSoldFilter()">≤ Sold median: OFF</button>
+      <button class="sort-btn" id="btn-sold-filter" onclick="toggleSoldFilter()">Filter: OFF</button>
       <button class="btn btn-ghost" onclick="clearBargains()">Clear</button>
     </div>
   </div>
@@ -770,7 +770,7 @@ let intervalVal = 5;
 let ws = null;
 const priceRanges = {}; // { "query|platform": {min, max, count} }
 const soldStats   = {}; // { query: {median, mean, min, max, count} }
-let filterSoldRange = false;
+let soldFilter = 'off'; // 'off' | 'median' | 'mean'
 
 const PLAT_ICON  = { ebay: '🛒', vinted: '👗', depop: '📦', mercari_jp: '🇯🇵', rakuten_jp: '🎌' };
 const PLAT_COLOR = { ebay: 'var(--ebay)', vinted: 'var(--vinted)', depop: 'var(--depop)', mercari_jp: '#ff0211', rakuten_jp: '#bf0000' };
@@ -819,7 +819,7 @@ function connectWS() {
         s.sold_count  = ebay?.count;
         updateSoldCells(s.name, ebay);
       }
-      if (filterSoldRange) renderBargains();
+      if (soldFilter !== 'off') renderBargains();
       if (document.querySelector('.tab-btn[data-tab="alerts"]')?.classList.contains('active')) loadAlerts();
     }
   };
@@ -1123,20 +1123,30 @@ function sortedBargains() {
   return [...bargains];
 }
 
+function _soldThreshold(b) {
+  const st = soldStats[b.query] || (() => {
+    const s = searches.find(x => x.query === b.query);
+    return s?.sold_median ? { median: s.sold_median, mean: s.sold_mean } : null;
+  })();
+  if (!st) return null;
+  return soldFilter === 'median' ? parseFloat(st.median) : parseFloat(st.mean);
+}
+
 function renderBargains() {
   const el = document.getElementById('bargains-list');
   let items = sortedBargains();
-  if (filterSoldRange) {
+  if (soldFilter !== 'off') {
     items = items.filter(b => {
-      const st = soldStats[b.query] || searches.find(s => s.query === b.query && s.sold_median) && { median: searches.find(s => s.query === b.query).sold_median };
-      if (!st?.median) return true;
-      return parsePrice(b.price) <= parseFloat(st.median);
+      const thresh = _soldThreshold(b);
+      if (thresh == null) return true;
+      return parsePrice(b.price) <= thresh;
     });
   }
   if (!items.length) {
+    const active = soldFilter !== 'off';
     el.innerHTML = `<div class="empty">
-      <div class="empty-title">${filterSoldRange ? 'No listings at or below sold median' : 'No new listings yet'}</div>
-      <div class="empty-sub">${filterSoldRange ? 'Turn off the filter or scrape eBay sold data in Alerts' : 'Start a watch in Tasks to begin finding listings'}</div>
+      <div class="empty-title">${active ? `No listings at or below sold ${soldFilter}` : 'No new listings yet'}</div>
+      <div class="empty-sub">${active ? 'Turn off the filter or scrape eBay sold data in Alerts' : 'Start a watch in Tasks to begin finding listings'}</div>
     </div>`;
     updateBadge('bargains', 0);
     return;
@@ -1146,10 +1156,21 @@ function renderBargains() {
 }
 
 function toggleSoldFilter() {
-  filterSoldRange = !filterSoldRange;
+  const cycle = { off: 'median', median: 'mean', mean: 'off' };
+  soldFilter = cycle[soldFilter];
   const btn = document.getElementById('btn-sold-filter');
-  btn.textContent = `≤ Sold median: ${filterSoldRange ? 'ON' : 'OFF'}`;
-  btn.classList.toggle('active', filterSoldRange);
+  if (soldFilter === 'off') {
+    btn.textContent = 'Filter: OFF';
+    btn.classList.remove('active');
+  } else {
+    // Show the actual threshold £ values across all queries that have data
+    const vals = searches
+      .filter(s => soldStats[s.query]?.[soldFilter] || s[`sold_${soldFilter}`])
+      .map(s => `£${parseFloat(soldStats[s.query]?.[soldFilter] || s[`sold_${soldFilter}`]).toFixed(0)}`);
+    const label = soldFilter === 'median' ? 'Median' : 'Mean';
+    btn.textContent = `≤ ${label}${vals.length ? ': '+vals.join(' / ') : ''}`;
+    btn.classList.add('active');
+  }
   renderBargains();
 }
 
